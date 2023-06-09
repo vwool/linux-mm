@@ -475,7 +475,7 @@ retry:
 	/* Read the page with vaddr into memory */
 	old_page = get_user_page_vma_remote(mm, vaddr, gup_flags, &vma);
 	if (IS_ERR_OR_NULL(old_page))
-		return PTR_ERR(old_page);
+		return old_page ? PTR_ERR(old_page) : 0;
 
 	ret = verify_opcode(old_page, vaddr, &opcode);
 	if (ret <= 0)
