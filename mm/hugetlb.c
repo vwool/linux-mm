@@ -5731,9 +5731,10 @@ static bool hugetlbfs_pagecache_present(struct hstate *h,
 	struct folio *folio;
 
 	folio = filemap_get_folio(mapping, idx);
-	if (!IS_ERR(folio))
-		folio_put(folio);
-	return folio != NULL;
+	if (IS_ERR(folio))
+		return false;
+	folio_put(folio);
+	return true;
 }
 
 int hugetlb_add_to_page_cache(struct folio *folio, struct address_space *mapping,
