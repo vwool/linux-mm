@@ -128,7 +128,7 @@ static inline void __chk_io_ptr(const volatile void __iomem *ptr) { }
  *
  * clang: https://clang.llvm.org/docs/AttributeReference.html#preserve-most
  */
-#if __has_attribute(__preserve_most__)
+#if __has_attribute(__preserve_most__) && (defined(CONFIG_X86_64) || defined(CONFIG_ARM64))
 # define __preserve_most notrace __attribute__((__preserve_most__))
 #else
 # define __preserve_most
