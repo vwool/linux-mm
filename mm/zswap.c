@@ -1421,7 +1421,6 @@ bool zswap_load(struct folio *folio)
 	bool ret;
 
 	VM_WARN_ON_ONCE(!folio_test_locked(folio));
-	VM_WARN_ON_ONCE(!folio_test_swapcache(folio));
 
 	/* find */
 	spin_lock(&tree->lock);
