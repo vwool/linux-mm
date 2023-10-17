@@ -411,7 +411,7 @@ struct folio *filemap_get_incore_folio(struct address_space *mapping,
 
 struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr,
-			bool *new_page_allocated)
+			bool *new_page_allocated, bool fail_if_exists)
 {
 	struct swap_info_struct *si;
 	struct folio *folio;
@@ -468,6 +468,15 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		if (err != -EEXIST)
 			goto fail_put_swap;
 
+		/*
+		 * This check guards against a state that happens if a call
+		 * to __read_swap_cache_async triggers a reclaim, if the
+		 * reclaimer (zswap's writeback as of now) then decides to
+		 * reclaim that same entry, then the subsequent call to
+		 * __read_swap_cache_async would get stuck in this loop.
+		 */
+		if (fail_if_exists && err == -EEXIST)
+			goto fail_put_swap;
 		/*
 		 * We might race against __delete_from_swap_cache(), and
 		 * stumble across a swap_map entry whose SWAP_HAS_CACHE
@@ -530,7 +539,7 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 {
 	bool page_was_allocated;
 	struct page *retpage = __read_swap_cache_async(entry, gfp_mask,
-			vma, addr, &page_was_allocated);
+			vma, addr, &page_was_allocated, false);
 
 	if (page_was_allocated)
 		swap_readpage(retpage, false, plug);
@@ -649,7 +658,7 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 		/* Ok, do the async read-ahead now */
 		page = __read_swap_cache_async(
 			swp_entry(swp_type(entry), offset),
-			gfp_mask, vma, addr, &page_allocated);
+			gfp_mask, vma, addr, &page_allocated, false);
 		if (!page)
 			continue;
 		if (page_allocated) {
@@ -815,7 +824,7 @@ static struct page *swap_vma_readahead(swp_entry_t fentry, gfp_t gfp_mask,
 		pte_unmap(pte);
 		pte = NULL;
 		page = __read_swap_cache_async(entry, gfp_mask, vma,
-					       addr, &page_allocated);
+					       addr, &page_allocated, false);
 		if (!page)
 			continue;
 		if (page_allocated) {
