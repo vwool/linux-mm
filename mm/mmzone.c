@@ -78,6 +78,9 @@ void lruvec_init(struct lruvec *lruvec)
 
 	memset(lruvec, 0, sizeof(struct lruvec));
 	spin_lock_init(&lruvec->lru_lock);
+#ifdef CONFIG_ZSWAP
+	atomic_long_set(&lruvec->nr_zswap_protected, 0);
+#endif
 
 	for_each_lru(lru)
 		INIT_LIST_HEAD(&lruvec->lists[lru]);
