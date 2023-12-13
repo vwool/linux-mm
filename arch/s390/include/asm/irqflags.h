@@ -37,12 +37,19 @@ static __always_inline void __arch_local_irq_ssm(unsigned long flags)
 	asm volatile("ssm   %0" : : "Q" (flags) : "memory");
 }
 
-static __always_inline unsigned long arch_local_save_flags(void)
+#ifdef CONFIG_KMSAN
+#define ARCH_LOCAL_IRQ_ATTRIBUTES \
+	noinline notrace __no_sanitize_memory __maybe_unused
+#else
+#define ARCH_LOCAL_IRQ_ATTRIBUTES __always_inline
+#endif
+
+static ARCH_LOCAL_IRQ_ATTRIBUTES unsigned long arch_local_save_flags(void)
 {
 	return __arch_local_irq_stnsm(0xff);
 }
 
-static __always_inline unsigned long arch_local_irq_save(void)
+static ARCH_LOCAL_IRQ_ATTRIBUTES unsigned long arch_local_irq_save(void)
 {
 	return __arch_local_irq_stnsm(0xfc);
 }
@@ -52,7 +59,12 @@ static __always_inline void arch_local_irq_disable(void)
 	arch_local_irq_save();
 }
 
-static __always_inline void arch_local_irq_enable(void)
+static ARCH_LOCAL_IRQ_ATTRIBUTES void arch_local_irq_enable_external(void)
+{
+	__arch_local_irq_stosm(0x01);
+}
+
+static ARCH_LOCAL_IRQ_ATTRIBUTES void arch_local_irq_enable(void)
 {
 	__arch_local_irq_stosm(0x03);
 }
