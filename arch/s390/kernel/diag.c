@@ -9,6 +9,7 @@
 #include <linux/export.h>
 #include <linux/init.h>
 #include <linux/cpu.h>
+#include <linux/kmsan-checks.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
 #include <linux/vmalloc.h>
@@ -255,6 +256,7 @@ int diag224(void *ptr)
 		"1:\n"
 		EX_TABLE(0b,1b)
 		: "+d" (rc) :"d" (0), "d" (addr) : "memory");
+	kmsan_unpoison_memory(ptr, PAGE_SIZE);
 	return rc;
 }
 EXPORT_SYMBOL(diag224);
