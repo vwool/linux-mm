@@ -47,6 +47,21 @@ static bool tlb_next_batch(struct mmu_gather *tlb)
 	return true;
 }
 
+unsigned int tlb_reserve_space(struct mmu_gather *tlb, unsigned int nr)
+{
+	struct mmu_gather_batch *batch = tlb->active;
+	unsigned int nr_alloc = batch->max - batch->nr;
+
+	while (nr_alloc < nr) {
+		if (!tlb_next_batch(tlb))
+			break;
+		nr_alloc += tlb->active->max;
+	}
+
+	tlb->active = batch;
+	return nr_alloc;
+}
+
 #ifdef CONFIG_SMP
 static void tlb_flush_rmap_batch(struct mmu_gather_batch *batch, struct vm_area_struct *vma)
 {

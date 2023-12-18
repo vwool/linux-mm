@@ -601,6 +601,49 @@ static inline pte_t ptep_get_and_clear_full(struct mm_struct *mm,
 }
 #endif
 
+#ifndef clear_ptes
+struct mm_struct;
+/**
+ * clear_ptes - Clear a consecutive range of ptes and return the previous value.
+ * @mm: Address space that the ptes map.
+ * @address: Address corresponding to the first pte to clear.
+ * @ptep: Page table pointer for the first entry.
+ * @nr: Number of ptes to clear.
+ * @full: True if systematically clearing all ptes for the address space.
+ *
+ * A batched version of ptep_get_and_clear_full(), which returns the old pte
+ * value for the first pte in the range, but with young and/or dirty set if any
+ * of the ptes in the range were young or dirty.
+ *
+ * May be overridden by the architecture, else implemented as a loop over
+ * ptep_get_and_clear_full().
+ *
+ * Context: The caller holds the page table lock. The PTEs are all in the same
+ * PMD.
+ */
+static inline pte_t clear_ptes(struct mm_struct *mm,
+				unsigned long address, pte_t *ptep,
+				unsigned int nr, int full)
+{
+	unsigned int i;
+	pte_t pte;
+	pte_t orig_pte = ptep_get_and_clear_full(mm, address, ptep, full);
+
+	for (i = 1; i < nr; i++) {
+		address += PAGE_SIZE;
+		ptep++;
+		pte = ptep_get_and_clear_full(mm, address, ptep, full);
+
+		if (pte_dirty(pte))
+			orig_pte = pte_mkdirty(orig_pte);
+
+		if (pte_young(pte))
+			orig_pte = pte_mkyoung(orig_pte);
+	}
+
+	return orig_pte;
+}
+#endif
 
 /*
  * If two threads concurrently fault at the same page, the thread that

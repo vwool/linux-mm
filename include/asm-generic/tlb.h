@@ -75,6 +75,10 @@
  *    boolean indicating if the queue is (now) full and a call to
  *    tlb_flush_mmu() is required.
  *
+ *    tlb_reserve_space() attempts to preallocate space for nr pages and returns
+ *    the minimum garanteed number of pages that can be queued without overflow,
+ *    which may be more or less than requested.
+ *
  *    tlb_remove_page() and tlb_remove_page_size() imply the call to
  *    tlb_flush_mmu() when required and has no return value.
  *
@@ -263,6 +267,7 @@ struct mmu_gather_batch {
 extern bool __tlb_remove_page_size(struct mmu_gather *tlb,
 				   struct encoded_page *page,
 				   int page_size);
+extern unsigned int tlb_reserve_space(struct mmu_gather *tlb, unsigned int nr);
 
 #ifdef CONFIG_SMP
 /*
@@ -273,6 +278,12 @@ extern bool __tlb_remove_page_size(struct mmu_gather *tlb,
 extern void tlb_flush_rmaps(struct mmu_gather *tlb, struct vm_area_struct *vma);
 #endif
 
+#else
+static inline unsigned int tlb_reserve_space(struct mmu_gather *tlb,
+					     unsigned int nr)
+{
+	return 1;
+}
 #endif
 
 /*

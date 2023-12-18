@@ -1447,6 +1447,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 	pte_t *start_pte;
 	pte_t *pte;
 	swp_entry_t entry;
+	int nr;
 
 	tlb_change_page_size(tlb, PAGE_SIZE);
 	init_rss_vec(rss);
@@ -1459,6 +1460,9 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 	do {
 		pte_t ptent = ptep_get(pte);
 		struct page *page;
+		int i;
+
+		nr = 1;
 
 		if (pte_none(ptent))
 			continue;
@@ -1467,43 +1471,67 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 			break;
 
 		if (pte_present(ptent)) {
-			unsigned int delay_rmap;
+			unsigned int delay_rmap = 0;
+			struct folio *folio;
+			bool full = false;
+
+			/*
+			 * tlb_gather always has at least one slot so avoid call
+			 * to tlb_reserve_space() when pte_batch_remaining() is
+			 * a compile-time constant 1 (default).
+			 */
+			nr = pte_batch_remaining(ptent, addr, end);
+			if (unlikely(nr > 1))
+				nr = min_t(int, nr, tlb_reserve_space(tlb, nr));
 
 			page = vm_normal_page(vma, addr, ptent);
 			if (unlikely(!should_zap_page(details, page)))
 				continue;
-			ptent = ptep_get_and_clear_full(mm, addr, pte,
-							tlb->fullmm);
+			ptent = clear_ptes(mm, addr, pte, nr, tlb->fullmm);
 			arch_check_zapped_pte(vma, ptent);
-			tlb_remove_tlb_entry(tlb, pte, addr);
-			zap_install_uffd_wp_if_needed(vma, addr, pte, details,
-						      ptent);
+
+			for (i = 0; i < nr; i++) {
+				unsigned long subaddr = addr + PAGE_SIZE * i;
+
+				tlb_remove_tlb_entry(tlb, &pte[i], subaddr);
+				zap_install_uffd_wp_if_needed(vma, subaddr,
+						&pte[i], details, ptent);
+			}
 			if (unlikely(!page)) {
 				ksm_might_unmap_zero_page(mm, ptent);
 				continue;
 			}
 
-			delay_rmap = 0;
-			if (!PageAnon(page)) {
+			folio = page_folio(page);
+			if (!folio_test_anon(folio)) {
 				if (pte_dirty(ptent)) {
-					set_page_dirty(page);
+					folio_mark_dirty(folio);
 					if (tlb_delay_rmap(tlb)) {
 						delay_rmap = 1;
 						force_flush = 1;
 					}
 				}
 				if (pte_young(ptent) && likely(vma_has_recency(vma)))
-					mark_page_accessed(page);
+					folio_mark_accessed(folio);
 			}
-			rss[mm_counter(page)]--;
-			if (!delay_rmap) {
-				page_remove_rmap(page, vma, false);
-				if (unlikely(page_mapcount(page) < 0))
-					print_bad_pte(vma, addr, ptent, page);
+			rss[mm_counter(page)] -= nr;
+			for (i = 0; i < nr; i++, page++) {
+				if (!delay_rmap) {
+					page_remove_rmap(page, vma, false);
+					if (unlikely(page_mapcount(page) < 0))
+						print_bad_pte(vma, addr, ptent, page);
+				}
+
+				/*
+				 * nr calculated based on available space, so
+				 * can only be full on final iteration.
+				 */
+				VM_WARN_ON(full);
+				full = __tlb_remove_page(tlb, page, delay_rmap);
 			}
-			if (unlikely(__tlb_remove_page(tlb, page, delay_rmap))) {
+			if (unlikely(full)) {
 				force_flush = 1;
-				addr += PAGE_SIZE;
+				addr += PAGE_SIZE * nr;
 				break;
 			}
 			continue;
@@ -1557,7 +1585,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
 		}
 		pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
 		zap_install_uffd_wp_if_needed(vma, addr, pte, details, ptent);
-	} while (pte++, addr += PAGE_SIZE, addr != end);
+	} while (pte += nr, addr += PAGE_SIZE * nr, addr != end);
 
 	add_mm_rss_vec(mm, rss);
 	arch_leave_lazy_mmu_mode();
