@@ -929,42 +929,60 @@ copy_present_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma
 }
 
 /*
- * Copy one pte.  Returns 0 if succeeded, or -EAGAIN if one preallocated page
- * is required to copy this pte.
+ * Copy set of contiguous ptes.  Returns number of ptes copied if succeeded
+ * (always gte 1), or -EAGAIN if one preallocated page is required to copy the
+ * first pte.
  */
 static inline int
-copy_present_pte(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
-		 pte_t *dst_pte, pte_t *src_pte, unsigned long addr, int *rss,
-		 struct folio **prealloc)
+copy_present_ptes(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+		  pte_t *dst_pte, pte_t *src_pte, pte_t pte,
+		  unsigned long addr, unsigned long end,
+		  int *rss, struct folio **prealloc)
 {
 	struct mm_struct *src_mm = src_vma->vm_mm;
 	unsigned long vm_flags = src_vma->vm_flags;
-	pte_t pte = ptep_get(src_pte);
 	struct page *page;
 	struct folio *folio;
+	int nr, i, ret;
+
+	nr = pte_batch_remaining(pte, addr, end);
 
 	page = vm_normal_page(src_vma, addr, pte);
-	if (page)
+	if (page) {
 		folio = page_folio(page);
+		folio_ref_add(folio, nr);
+	}
 	if (page && folio_test_anon(folio)) {
-		/*
-		 * If this page may have been pinned by the parent process,
-		 * copy the page immediately for the child so that we'll always
-		 * guarantee the pinned page won't be randomly replaced in the
-		 * future.
-		 */
-		folio_get(folio);
-		if (unlikely(page_try_dup_anon_rmap(page, false, src_vma))) {
-			/* Page may be pinned, we have to copy. */
-			folio_put(folio);
-			return copy_present_page(dst_vma, src_vma, dst_pte, src_pte,
-						 addr, rss, prealloc, page);
+		for (i = 0; i < nr; i++, page++) {
+			/*
+			 * If this page may have been pinned by the parent
+			 * process, copy the page immediately for the child so
+			 * that we'll always guarantee the pinned page won't be
+			 * randomly replaced in the future.
+			 */
+			if (unlikely(page_try_dup_anon_rmap(page, false, src_vma))) {
+				if (i != 0)
+					break;
+				/* Page may be pinned, we have to copy. */
+				folio_ref_sub(folio, nr);
+				ret = copy_present_page(dst_vma, src_vma,
+							dst_pte, src_pte, addr,
+							rss, prealloc, page);
+				return ret == 0 ? 1 : ret;
+			}
+			VM_BUG_ON(PageAnonExclusive(page));
 		}
-		rss[MM_ANONPAGES]++;
+
+		if (unlikely(i < nr)) {
+			folio_ref_sub(folio, nr - i);
+			nr = i;
+		}
+
+		rss[MM_ANONPAGES] += nr;
 	} else if (page) {
-		folio_get(folio);
-		page_dup_file_rmap(page, false);
-		rss[mm_counter_file(page)]++;
+		for (i = 0; i < nr; i++)
+			page_dup_file_rmap(page + i, false);
+		rss[mm_counter_file(page)] += nr;
 	}
 
 	/*
@@ -972,10 +990,9 @@ copy_present_pte(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	 * in the parent and the child
 	 */
 	if (is_cow_mapping(vm_flags) && pte_write(pte)) {
-		ptep_set_wrprotect(src_mm, addr, src_pte);
+		ptep_set_wrprotects(src_mm, addr, src_pte, nr, true);
 		pte = pte_wrprotect(pte);
 	}
-	VM_BUG_ON(page && folio_test_anon(folio) && PageAnonExclusive(page));
 
 	/*
 	 * If it's a shared mapping, mark it clean in
@@ -988,8 +1005,8 @@ copy_present_pte(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	if (!userfaultfd_wp(dst_vma))
 		pte = pte_clear_uffd_wp(pte);
 
-	set_pte_at(dst_vma->vm_mm, addr, dst_pte, pte);
-	return 0;
+	set_ptes_full(dst_vma->vm_mm, addr, dst_pte, pte, nr, true);
+	return nr;
 }
 
 static inline struct folio *folio_prealloc(struct mm_struct *src_mm,
@@ -1030,6 +1047,7 @@ copy_pte_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 	struct folio *prealloc = NULL;
+	int nr_ptes;
 
 again:
 	progress = 0;
@@ -1060,6 +1078,8 @@ again:
 	arch_enter_lazy_mmu_mode();
 
 	do {
+		nr_ptes = 1;
+
 		/*
 		 * We are holding two locks at this point - either of them
 		 * could generate latencies in another task on another CPU.
@@ -1095,16 +1115,21 @@ again:
 			 * the now present pte.
 			 */
 			WARN_ON_ONCE(ret != -ENOENT);
+			ret = 0;
 		}
-		/* copy_present_pte() will clear `*prealloc' if consumed */
-		ret = copy_present_pte(dst_vma, src_vma, dst_pte, src_pte,
-				       addr, rss, &prealloc);
+		/* copy_present_ptes() will clear `*prealloc' if consumed */
+		nr_ptes = copy_present_ptes(dst_vma, src_vma, dst_pte, src_pte,
+					    ptent, addr, end, rss, &prealloc);
+
 		/*
 		 * If we need a pre-allocated page for this pte, drop the
 		 * locks, allocate, and try again.
 		 */
-		if (unlikely(ret == -EAGAIN))
+		if (unlikely(nr_ptes == -EAGAIN)) {
+			ret = -EAGAIN;
 			break;
+		}
+
 		if (unlikely(prealloc)) {
 			/*
 			 * pre-alloc page cannot be reused by next time so as
@@ -1115,8 +1140,9 @@ again:
 			folio_put(prealloc);
 			prealloc = NULL;
 		}
-		progress += 8;
-	} while (dst_pte++, src_pte++, addr += PAGE_SIZE, addr != end);
+		progress += 8 * nr_ptes;
+	} while (dst_pte += nr_ptes, src_pte += nr_ptes,
+		 addr += PAGE_SIZE * nr_ptes, addr != end);
 
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(orig_src_pte, src_ptl);

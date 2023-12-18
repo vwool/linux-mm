@@ -205,6 +205,27 @@ static inline int pmd_young(pmd_t pmd)
 #define arch_flush_lazy_mmu_mode()	do {} while (0)
 #endif
 
+#ifndef pte_batch_remaining
+/**
+ * pte_batch_remaining - Number of pages from addr to next batch boundary.
+ * @pte: Page table entry for the first page.
+ * @addr: Address of the first page.
+ * @end: Batch ceiling (e.g. end of vma).
+ *
+ * Some architectures (arm64) can efficiently modify a contiguous batch of ptes.
+ * In such cases, this function returns the remaining number of pages to the end
+ * of the current batch, as defined by addr. This can be useful when iterating
+ * over ptes.
+ *
+ * May be overridden by the architecture, else batch size is always 1.
+ */
+static inline unsigned int pte_batch_remaining(pte_t pte, unsigned long addr,
+						unsigned long end)
+{
+	return 1;
+}
+#endif
+
 #ifndef set_ptes
 
 #ifndef pte_next_pfn
@@ -245,6 +266,34 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 }
 #endif
 #define set_pte_at(mm, addr, ptep, pte) set_ptes(mm, addr, ptep, pte, 1)
+
+#ifndef set_ptes_full
+/**
+ * set_ptes_full - Map consecutive pages to a contiguous range of addresses.
+ * @mm: Address space to map the pages into.
+ * @addr: Address to map the first page at.
+ * @ptep: Page table pointer for the first entry.
+ * @pte: Page table entry for the first page.
+ * @nr: Number of pages to map.
+ * @full: True if systematically setting all ptes and their previous values
+ *        were known to be none (e.g. part of fork).
+ *
+ * Some architectures (arm64) can optimize the implementation if copying ptes
+ * batach-by-batch from the parent, where a batch is defined by
+ * pte_batch_remaining().
+ *
+ * May be overridden by the architecture, else full is ignored and call is
+ * forwarded to set_ptes().
+ *
+ * Context: The caller holds the page table lock.  The pages all belong to the
+ * same folio.  The PTEs are all in the same PMD.
+ */
+static inline void set_ptes_full(struct mm_struct *mm, unsigned long addr,
+		pte_t *ptep, pte_t pte, unsigned int nr, int full)
+{
+	set_ptes(mm, addr, ptep, pte, nr);
+}
+#endif
 
 #ifndef __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
 extern int ptep_set_access_flags(struct vm_area_struct *vma,
@@ -619,6 +668,37 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addres
 {
 	pte_t old_pte = ptep_get(ptep);
 	set_pte_at(mm, address, ptep, pte_wrprotect(old_pte));
+}
+#endif
+
+#ifndef ptep_set_wrprotects
+struct mm_struct;
+/**
+ * ptep_set_wrprotects - Write protect a consecutive set of pages.
+ * @mm: Address space that the pages are mapped into.
+ * @address: Address of first page to write protect.
+ * @ptep: Page table pointer for the first entry.
+ * @nr: Number of pages to write protect.
+ * @full: True if systematically wite protecting all ptes (e.g. part of fork).
+ *
+ * Some architectures (arm64) can optimize the implementation if
+ * write-protecting ptes batach-by-batch, where a batch is defined by
+ * pte_batch_remaining().
+ *
+ * May be overridden by the architecture, else implemented as a loop over
+ * ptep_set_wrprotect().
+ *
+ * Context: The caller holds the page table lock. The PTEs are all in the same
+ * PMD.
+ */
+static inline void ptep_set_wrprotects(struct mm_struct *mm,
+				unsigned long address, pte_t *ptep,
+				unsigned int nr, int full)
+{
+	unsigned int i;
+
+	for (i = 0; i < nr; i++, address += PAGE_SIZE, ptep++)
+		ptep_set_wrprotect(mm, address, ptep);
 }
 #endif
 
