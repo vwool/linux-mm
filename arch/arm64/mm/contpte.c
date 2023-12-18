@@ -293,6 +293,51 @@ void contpte_set_ptes(struct mm_struct *mm, unsigned long addr,
 }
 EXPORT_SYMBOL(contpte_set_ptes);
 
+pte_t contpte_clear_ptes(struct mm_struct *mm, unsigned long addr, pte_t *ptep,
+					unsigned int nr, int full)
+{
+	/*
+	 * If we cover a partial contpte block at the beginning or end of the
+	 * batch, unfold if currently folded. This makes it safe to clear some
+	 * of the entries while keeping others. contpte blocks in the middle of
+	 * the range, which are fully covered don't need to be unfolded because
+	 * we will clear the full block.
+	 */
+
+	unsigned int i;
+	pte_t pte;
+	pte_t tail;
+
+	if (!mm_is_user(mm))
+		return __clear_ptes(mm, addr, ptep, nr, full);
+
+	if (ptep != contpte_align_down(ptep) || nr < CONT_PTES)
+		contpte_try_unfold(mm, addr, ptep, __ptep_get(ptep));
+
+	if (ptep + nr != contpte_align_down(ptep + nr))
+		contpte_try_unfold(mm, addr + PAGE_SIZE * (nr - 1),
+				   ptep + nr - 1,
+				   __ptep_get(ptep + nr - 1));
+
+	pte = __ptep_get_and_clear(mm, addr, ptep);
+
+	for (i = 1; i < nr; i++) {
+		addr += PAGE_SIZE;
+		ptep++;
+
+		tail = __ptep_get_and_clear(mm, addr, ptep);
+
+		if (pte_dirty(tail))
+			pte = pte_mkdirty(pte);
+
+		if (pte_young(tail))
+			pte = pte_mkyoung(pte);
+	}
+
+	return pte;
+}
+EXPORT_SYMBOL(contpte_clear_ptes);
+
 int contpte_ptep_test_and_clear_young(struct vm_area_struct *vma,
 					unsigned long addr, pte_t *ptep)
 {
