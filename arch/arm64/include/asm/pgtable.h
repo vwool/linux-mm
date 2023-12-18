@@ -966,6 +966,20 @@ static inline pmd_t pmdp_huge_get_and_clear(struct mm_struct *mm,
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
+static inline void ___ptep_set_wrprotect(struct mm_struct *mm,
+					unsigned long address, pte_t *ptep,
+					pte_t pte)
+{
+	pte_t old_pte;
+
+	do {
+		old_pte = pte;
+		pte = pte_wrprotect(pte);
+		pte_val(pte) = cmpxchg_relaxed(&pte_val(*ptep),
+					       pte_val(old_pte), pte_val(pte));
+	} while (pte_val(pte) != pte_val(old_pte));
+}
+
 /*
  * __ptep_set_wrprotect - mark read-only while trasferring potential hardware
  * dirty status (PTE_DBM && !PTE_RDONLY) to the software PTE_DIRTY bit.
@@ -973,15 +987,17 @@ static inline pmd_t pmdp_huge_get_and_clear(struct mm_struct *mm,
 static inline void __ptep_set_wrprotect(struct mm_struct *mm,
 					unsigned long address, pte_t *ptep)
 {
-	pte_t old_pte, pte;
+	___ptep_set_wrprotect(mm, address, ptep, __ptep_get(ptep));
+}
 
-	pte = __ptep_get(ptep);
-	do {
-		old_pte = pte;
-		pte = pte_wrprotect(pte);
-		pte_val(pte) = cmpxchg_relaxed(&pte_val(*ptep),
-					       pte_val(old_pte), pte_val(pte));
-	} while (pte_val(pte) != pte_val(old_pte));
+static inline void __ptep_set_wrprotects(struct mm_struct *mm,
+					unsigned long address, pte_t *ptep,
+					unsigned int nr, int full)
+{
+	unsigned int i;
+
+	for (i = 0; i < nr; i++, address += PAGE_SIZE, ptep++)
+		__ptep_set_wrprotect(mm, address, ptep);
 }
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
@@ -1139,6 +1155,8 @@ extern int contpte_ptep_test_and_clear_young(struct vm_area_struct *vma,
 				unsigned long addr, pte_t *ptep);
 extern int contpte_ptep_clear_flush_young(struct vm_area_struct *vma,
 				unsigned long addr, pte_t *ptep);
+extern void contpte_set_wrprotects(struct mm_struct *mm, unsigned long addr,
+				pte_t *ptep, unsigned int nr, int full);
 extern int contpte_ptep_set_access_flags(struct vm_area_struct *vma,
 				unsigned long addr, pte_t *ptep,
 				pte_t entry, int dirty);
@@ -1168,6 +1186,17 @@ static inline void contpte_try_unfold(struct mm_struct *mm, unsigned long addr,
 {
 	if (pte_valid_cont(pte))
 		__contpte_try_unfold(mm, addr, ptep, pte);
+}
+
+#define pte_batch_remaining pte_batch_remaining
+static inline unsigned int pte_batch_remaining(pte_t pte, unsigned long addr,
+					unsigned long end)
+{
+	if (!pte_valid_cont(pte))
+		return 1;
+
+	return min(CONT_PTES - ((addr >> PAGE_SHIFT) & (CONT_PTES - 1)),
+		   (end - addr) >> PAGE_SHIFT);
 }
 
 /*
@@ -1219,18 +1248,28 @@ static inline void set_pte(pte_t *ptep, pte_t pte)
 	__set_pte(ptep, pte_mknoncont(pte));
 }
 
-#define set_ptes set_ptes
-static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
-				pte_t *ptep, pte_t pte, unsigned int nr)
+#define set_ptes_full set_ptes_full
+static inline void set_ptes_full(struct mm_struct *mm, unsigned long addr,
+				pte_t *ptep, pte_t pte, unsigned int nr,
+				int full)
 {
 	pte = pte_mknoncont(pte);
 
 	if (nr == 1) {
-		contpte_try_unfold(mm, addr, ptep, __ptep_get(ptep));
+		if (!full)
+			contpte_try_unfold(mm, addr, ptep, __ptep_get(ptep));
 		__set_ptes(mm, addr, ptep, pte, 1);
-		contpte_try_fold(mm, addr, ptep, pte);
+		if (!full)
+			contpte_try_fold(mm, addr, ptep, pte);
 	} else
 		contpte_set_ptes(mm, addr, ptep, pte, nr);
+}
+
+#define set_ptes set_ptes
+static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
+				pte_t *ptep, pte_t pte, unsigned int nr)
+{
+	set_ptes_full(mm, addr, ptep, pte, nr, false);
 }
 
 static inline void pte_clear(struct mm_struct *mm,
@@ -1272,13 +1311,38 @@ static inline int ptep_clear_flush_young(struct vm_area_struct *vma,
 	return contpte_ptep_clear_flush_young(vma, addr, ptep);
 }
 
+#define ptep_set_wrprotects ptep_set_wrprotects
+static inline void ptep_set_wrprotects(struct mm_struct *mm,
+				unsigned long addr, pte_t *ptep,
+				unsigned int nr, int full)
+{
+	if (nr == 1) {
+		/*
+		 * Optimization: ptep_set_wrprotects() can only be called for
+		 * present ptes so we only need to check contig bit as condition
+		 * for unfold, and we can remove the contig bit from the pte we
+		 * read to avoid re-reading. This speeds up fork() with is very
+		 * sensitive for order-0 folios. Should be equivalent to
+		 * contpte_try_unfold() for this case.
+		 */
+		pte_t orig_pte = __ptep_get(ptep);
+
+		if (unlikely(pte_cont(orig_pte))) {
+			__contpte_try_unfold(mm, addr, ptep, orig_pte);
+			orig_pte = pte_mknoncont(orig_pte);
+		}
+		___ptep_set_wrprotect(mm, addr, ptep, orig_pte);
+		if (!full)
+			contpte_try_fold(mm, addr, ptep, __ptep_get(ptep));
+	} else
+		contpte_set_wrprotects(mm, addr, ptep, nr, full);
+}
+
 #define __HAVE_ARCH_PTEP_SET_WRPROTECT
 static inline void ptep_set_wrprotect(struct mm_struct *mm,
 				unsigned long addr, pte_t *ptep)
 {
-	contpte_try_unfold(mm, addr, ptep, __ptep_get(ptep));
-	__ptep_set_wrprotect(mm, addr, ptep);
-	contpte_try_fold(mm, addr, ptep, __ptep_get(ptep));
+	ptep_set_wrprotects(mm, addr, ptep, 1, false);
 }
 
 #define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
@@ -1310,6 +1374,7 @@ static inline int ptep_set_access_flags(struct vm_area_struct *vma,
 #define ptep_clear_flush_young			__ptep_clear_flush_young
 #define __HAVE_ARCH_PTEP_SET_WRPROTECT
 #define ptep_set_wrprotect			__ptep_set_wrprotect
+#define ptep_set_wrprotects			__ptep_set_wrprotects
 #define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
 #define ptep_set_access_flags			__ptep_set_access_flags
 
