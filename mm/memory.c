@@ -3952,7 +3952,8 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 			folio = swapcache;
 			goto out_page;
 		}
-		page = folio_page(folio, 0);
+		if (folio != swapcache)
+			page = folio_page(folio, 0);
 
 		/*
 		 * If we want to map a page that's in the swapcache writable, we
