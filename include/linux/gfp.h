@@ -247,6 +247,15 @@ struct folio *__folio_alloc_node(gfp_t gfp, unsigned int order, int nid)
 	return __folio_alloc(gfp, order, nid, NULL);
 }
 
+static inline
+struct folio *folio_alloc_node(gfp_t gfp, unsigned int order, int nid)
+{
+	if (nid == NUMA_NO_NODE)
+		nid = numa_mem_id();
+
+	return __folio_alloc_node(gfp, order, nid);
+}
+
 /*
  * Allocate pages, preferring the node given as nid. When nid == NUMA_NO_NODE,
  * prefer the current CPU's closest node. Otherwise node must be valid and
