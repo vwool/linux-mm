@@ -972,7 +972,7 @@ struct page_state {
 static bool has_extra_refcount(struct page_state *ps, struct page *p,
 			       bool extra_pins)
 {
-	int count = page_count(p) - 1;
+	int count = page_count(p) - folio_nr_pages(page_folio(p));
 
 	if (extra_pins)
 		count -= 1;
