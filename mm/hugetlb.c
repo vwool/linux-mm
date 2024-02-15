@@ -7855,6 +7855,13 @@ void __init hugetlb_cma_reserve(int order)
 	}
 
 	reserved = 0;
+
+	/*
+	 * There needs to be enough MAX_CMA_AREAS to accommodate
+	 * MAX_NUMNODES heap areas being created here. Otherwise
+	 * adjust CONFIG_CMA_AREAS as required.
+	 */
+	BUILD_BUG_ON(MAX_CMA_AREAS < MAX_NUMNODES);
 	for_each_online_node(nid) {
 		int res;
 		char name[CMA_MAX_NAME];
