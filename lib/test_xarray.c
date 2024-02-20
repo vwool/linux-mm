@@ -728,7 +728,7 @@ static noinline void *test_get_entry(struct xarray *xa, unsigned long index)
 {
 	XA_STATE(xas, xa, index);
 	void *p;
-	unsigned int loops = 0;
+	static unsigned int loops = 0;
 
 	rcu_read_lock();
 repeat:
