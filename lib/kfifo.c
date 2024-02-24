@@ -497,7 +497,7 @@ unsigned int __kfifo_out_linear_r(struct __kfifo *fifo,
 	if (tail)
 		*tail = fifo->out + recsize;
 
-	return min(n, __kfifo_peek_n(fifo, recsize);
+	return min(n, __kfifo_peek_n(fifo, recsize));
 }
 EXPORT_SYMBOL(__kfifo_out_linear_r);
 
@@ -609,4 +609,3 @@ unsigned int __kfifo_dma_out_prepare_r(struct __kfifo *fifo,
 	return setup_sgl(fifo, sgl, nents, len, fifo->out + recsize);
 }
 EXPORT_SYMBOL(__kfifo_dma_out_prepare_r);
-
