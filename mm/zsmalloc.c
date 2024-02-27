@@ -253,6 +253,7 @@ struct zspage {
 	struct list_head list; /* fullness list */
 	struct zs_pool *pool;
 	rwlock_t lock;
+	struct rcu_head rcu_head;
 };
 
 struct mapping_area {
@@ -310,6 +311,8 @@ static int create_cache(struct zs_pool *pool)
 static void destroy_cache(struct zs_pool *pool)
 {
 	kmem_cache_destroy(pool->handle_cachep);
+	/* Synchronize RCU to free zspage. */
+	synchronize_rcu();
 	kmem_cache_destroy(pool->zspage_cachep);
 }
 
@@ -332,6 +335,14 @@ static struct zspage *cache_alloc_zspage(struct zs_pool *pool, gfp_t flags)
 
 static void cache_free_zspage(struct zs_pool *pool, struct zspage *zspage)
 {
+	kmem_cache_free(pool->zspage_cachep, zspage);
+}
+
+static void rcu_free_zspage(struct rcu_head *h)
+{
+	struct zspage *zspage = container_of(h, struct zspage, rcu_head);
+	struct zs_pool *pool = zspage->pool;
+
 	kmem_cache_free(pool->zspage_cachep, zspage);
 }
 
@@ -710,12 +721,29 @@ out:
 	return newfg;
 }
 
+static void set_zspage(struct page *page, struct zspage *zspage)
+{
+	struct zspage __rcu **private = (struct zspage __rcu **)&page->private;
+
+	rcu_assign_pointer(*private, zspage);
+}
+
 static struct zspage *get_zspage(struct page *page)
 {
-	struct zspage *zspage = (struct zspage *)page_private(page);
+	struct zspage __rcu **private = (struct zspage __rcu **)&page->private;
+	struct zspage *zspage;
 
+	zspage = rcu_dereference_protected(*private, true);
 	BUG_ON(zspage->magic != ZSPAGE_MAGIC);
 	return zspage;
+}
+
+/* Only used in zs_page_migrate() to get zspage locklessly. */
+static struct zspage *get_zspage_lockless(struct page *page)
+{
+	struct zspage __rcu **private = (struct zspage __rcu **)&page->private;
+
+	return rcu_dereference(*private);
 }
 
 static struct page *get_next_page(struct page *page)
@@ -793,30 +821,9 @@ static void reset_page(struct page *page)
 {
 	__ClearPageMovable(page);
 	ClearPagePrivate(page);
-	set_page_private(page, 0);
+	set_zspage(page, NULL);
 	page_mapcount_reset(page);
 	page->index = 0;
-}
-
-static int trylock_zspage(struct zspage *zspage)
-{
-	struct page *cursor, *fail;
-
-	for (cursor = get_first_page(zspage); cursor != NULL; cursor =
-					get_next_page(cursor)) {
-		if (!trylock_page(cursor)) {
-			fail = cursor;
-			goto unlock;
-		}
-	}
-
-	return 1;
-unlock:
-	for (cursor = get_first_page(zspage); cursor != fail; cursor =
-					get_next_page(cursor))
-		unlock_page(cursor);
-
-	return 0;
 }
 
 static void __free_zspage(struct zs_pool *pool, struct size_class *class,
@@ -834,13 +841,12 @@ static void __free_zspage(struct zs_pool *pool, struct size_class *class,
 		VM_BUG_ON_PAGE(!PageLocked(page), page);
 		next = get_next_page(page);
 		reset_page(page);
-		unlock_page(page);
 		dec_zone_page_state(page, NR_ZSPAGES);
 		put_page(page);
 		page = next;
 	} while (page != NULL);
 
-	cache_free_zspage(pool, zspage);
+	call_rcu(&zspage->rcu_head, rcu_free_zspage);
 
 	class_stat_dec(class, ZS_OBJS_ALLOCATED, class->objs_per_zspage);
 	atomic_long_sub(class->pages_per_zspage, &pool->pages_allocated);
@@ -851,16 +857,6 @@ static void free_zspage(struct zs_pool *pool, struct size_class *class,
 {
 	VM_BUG_ON(get_zspage_inuse(zspage));
 	VM_BUG_ON(list_empty(&zspage->list));
-
-	/*
-	 * Since zs_free couldn't be sleepable, this function cannot call
-	 * lock_page. The page locks trylock_zspage got will be released
-	 * by __free_zspage.
-	 */
-	if (!trylock_zspage(zspage)) {
-		kick_deferred_free(pool);
-		return;
-	}
 
 	remove_zspage(class, zspage);
 	__free_zspage(pool, class, zspage);
@@ -929,7 +925,7 @@ static void create_page_chain(struct size_class *class, struct zspage *zspage,
 	 */
 	for (i = 0; i < nr_pages; i++) {
 		page = pages[i];
-		set_page_private(page, (unsigned long)zspage);
+		set_zspage(page, zspage);
 		page->index = 0;
 		if (i == 0) {
 			zspage->first_page = page;
@@ -978,10 +974,11 @@ static struct zspage *alloc_zspage(struct zs_pool *pool,
 		pages[i] = page;
 	}
 
-	create_page_chain(class, zspage, pages);
 	init_zspage(class, zspage);
 	zspage->pool = pool;
 	zspage->class = class->index;
+	/* RCU set_zspage() after zspage initialized. */
+	create_page_chain(class, zspage, pages);
 
 	return zspage;
 }
@@ -1765,16 +1762,34 @@ static int zs_page_migrate(struct page *newpage, struct page *page,
 
 	VM_BUG_ON_PAGE(!PageIsolated(page), page);
 
-	/* The page is locked, so this pointer must remain valid */
-	zspage = get_zspage(page);
-	pool = zspage->pool;
+	rcu_read_lock();
+	zspage = get_zspage_lockless(page);
+	if (!zspage) {
+		rcu_read_unlock();
+		return -EINVAL;
+	}
 
 	/*
 	 * The pool's lock protects the race between zpage migration
-	 * and zs_free.
+	 * and zs_free. We check if the zspage is still in pool with
+	 * pool->lock protection. If the zspage isn't in pool anymore,
+	 * it should be freed by RCU soon.
 	 */
+	pool = zspage->pool;
 	spin_lock(&pool->lock);
 	class = zspage_class(pool, zspage);
+
+	if (list_empty(&zspage->list)) {
+		spin_unlock(&pool->lock);
+		rcu_read_unlock();
+		return -EINVAL;
+	}
+
+	/*
+	 * Now the zspage is still on pool, and we held pool->lock,
+	 * it can't be freed in the meantime.
+	 */
+	rcu_read_unlock();
 
 	/* the migrate_write_lock protects zpage access via zs_map_object */
 	migrate_write_lock(zspage);
