@@ -931,6 +931,7 @@ void start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_core_init();
+	cpumask_cache_init();
 	poking_init();
 	ftrace_init();
 
