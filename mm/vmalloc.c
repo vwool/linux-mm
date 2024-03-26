@@ -3690,7 +3690,7 @@ fail:
 }
 
 /**
- * __vmalloc_node_range_noprof - allocate virtually contiguous memory
+ * __vmalloc_node_range - allocate virtually contiguous memory
  * @size:		  allocation size
  * @align:		  desired alignment
  * @start:		  vm area range start
@@ -3846,7 +3846,7 @@ fail:
 }
 
 /**
- * __vmalloc_node_noprof - allocate virtually contiguous memory
+ * __vmalloc_node - allocate virtually contiguous memory
  * @size:	    allocation size
  * @align:	    desired alignment
  * @gfp_mask:	    flags for the page level allocator
@@ -3926,7 +3926,7 @@ void *vmalloc_huge_noprof(unsigned long size, gfp_t gfp_mask)
 EXPORT_SYMBOL_GPL(vmalloc_huge_noprof);
 
 /**
- * vzalloc_noprof - allocate virtually contiguous memory with zero fill
+ * vzalloc - allocate virtually contiguous memory with zero fill
  * @size:    allocation size
  *
  * Allocate enough pages to cover @size from the page level
@@ -3964,7 +3964,7 @@ void *vmalloc_user_noprof(unsigned long size)
 EXPORT_SYMBOL(vmalloc_user_noprof);
 
 /**
- * vmalloc_node_noprof - allocate memory on a specific node
+ * vmalloc_node - allocate memory on a specific node
  * @size:	  allocation size
  * @node:	  numa node
  *
@@ -3984,7 +3984,7 @@ void *vmalloc_node_noprof(unsigned long size, int node)
 EXPORT_SYMBOL(vmalloc_node_noprof);
 
 /**
- * vzalloc_node_noprof - allocate memory on a specific node with zero fill
+ * vzalloc_node - allocate memory on a specific node with zero fill
  * @size:	allocation size
  * @node:	numa node
  *
@@ -4014,7 +4014,7 @@ EXPORT_SYMBOL(vzalloc_node_noprof);
 #endif
 
 /**
- * vmalloc_32_noprof - allocate virtually contiguous memory (32bit addressable)
+ * vmalloc_32 - allocate virtually contiguous memory (32bit addressable)
  * @size:	allocation size
  *
  * Allocate enough 32bit PA addressable pages to cover @size from the
@@ -4030,7 +4030,7 @@ void *vmalloc_32_noprof(unsigned long size)
 EXPORT_SYMBOL(vmalloc_32_noprof);
 
 /**
- * vmalloc_32_user_noprof - allocate zeroed virtually contiguous 32bit memory
+ * vmalloc_32_user - allocate zeroed virtually contiguous 32bit memory
  * @size:	     allocation size
  *
  * The resulting memory area is 32bit addressable and zeroed so it can be
