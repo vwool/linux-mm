@@ -11,6 +11,8 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/rmap.h>
+#include <linux/swap.h>
+#include <linux/swapops.h>
 #include <linux/tracepoint-defs.h>
 
 struct folio_batch;
@@ -188,6 +190,52 @@ static inline int folio_pte_batch(struct folio *folio, unsigned long addr,
 	}
 
 	return min(ptep - start_ptep, max_nr);
+}
+
+/**
+ * swap_pte_batch - detect a PTE batch for a set of contiguous swap entries
+ * @start_ptep: Page table pointer for the first entry.
+ * @max_nr: The maximum number of table entries to consider.
+ * @entry: Swap entry recovered from the first table entry.
+ *
+ * Detect a batch of contiguous swap entries: consecutive (non-present) PTEs
+ * containing swap entries all with consecutive offsets and targeting the same
+ * swap type.
+ *
+ * max_nr must be at least one and must be limited by the caller so scanning
+ * cannot exceed a single page table.
+ *
+ * Return: the number of table entries in the batch.
+ */
+static inline int swap_pte_batch(pte_t *start_ptep, int max_nr,
+				 swp_entry_t entry)
+{
+	const pte_t *end_ptep = start_ptep + max_nr;
+	unsigned long expected_offset = swp_offset(entry) + 1;
+	unsigned int expected_type = swp_type(entry);
+	pte_t *ptep = start_ptep + 1;
+
+	VM_WARN_ON(max_nr < 1);
+	VM_WARN_ON(non_swap_entry(entry));
+
+	while (ptep < end_ptep) {
+		pte_t pte = ptep_get(ptep);
+
+		if (pte_none(pte) || pte_present(pte))
+			break;
+
+		entry = pte_to_swp_entry(pte);
+
+		if (non_swap_entry(entry) ||
+		    swp_type(entry) != expected_type ||
+		    swp_offset(entry) != expected_offset)
+			break;
+
+		expected_offset++;
+		ptep++;
+	}
+
+	return ptep - start_ptep;
 }
 #endif /* CONFIG_MMU */
 
