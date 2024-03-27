@@ -78,10 +78,8 @@ void dc_fpu_begin(const char *function_name, const int line)
 	WARN_ON_ONCE(!in_task());
 	preempt_disable();
 	depth = __this_cpu_inc_return(fpu_recursion_depth);
-	if (depth == 1) {
-		BUG_ON(!kernel_fpu_available());
+	if (depth == 1)
 		kernel_fpu_begin();
-	}
 
 	TRACE_DCN_FPU(true, function_name, line, depth);
 }
