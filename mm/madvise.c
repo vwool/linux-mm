@@ -486,10 +486,9 @@ restart:
 					pte_offset_map_lock(mm, pmd, addr, &ptl);
 				if (!start_pte)
 					break;
-				if (err)
-					continue;
 				arch_enter_lazy_mmu_mode();
-				nr = 0;
+				if (!err)
+					nr = 0;
 				continue;
 			}
 		}
