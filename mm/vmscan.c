@@ -1230,6 +1230,9 @@ retry:
 						count_vm_event(
 							THP_SWPOUT_FALLBACK);
 					}
+					if (nr_pages > 0)
+						count_mthp_stat(get_order(nr_pages * PAGE_SIZE),
+							MTHP_STAT_ANON_SWPOUT_FALLBACK);
 #endif
 					if (!add_to_swap(folio))
 						goto activate_locked_split;
