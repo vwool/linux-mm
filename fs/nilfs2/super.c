@@ -29,14 +29,13 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/blkdev.h>
-#include <linux/fs_context.h>
-#include <linux/fs_parser.h>
 #include <linux/crc32.h>
 #include <linux/vfs.h>
 #include <linux/writeback.h>
 #include <linux/seq_file.h>
 #include <linux/mount.h>
 #include <linux/fs_context.h>
+#include <linux/fs_parser.h>
 #include "nilfs.h"
 #include "export.h"
 #include "mdt.h"
@@ -1025,8 +1024,7 @@ int nilfs_checkpoint_is_mounted(struct super_block *sb, __u64 cno)
 /**
  * nilfs_fill_super() - initialize a super block instance
  * @sb: super_block
- * @data: mount options
- * @silent: silent mode flag
+ * @fc: filesystem context
  *
  * This function is called exclusively by nilfs->ns_mount_mutex.
  * So, the recovery process is protected from other simultaneous mounts.
@@ -1193,8 +1191,9 @@ nilfs_get_tree(struct fs_context *fc)
 	int err;
 
 	if (ctx->cno && !(fc->sb_flags & SB_RDONLY)) {
-		nilfs_err(s, "invalid option \"cp=%llu\": read-only option is not specified",
-			ctx->cno);
+		nilfs_err(NULL,
+			  "invalid option \"cp=%llu\": read-only option is not specified",
+			  ctx->cno);
 		return -EINVAL;
 	}
 
@@ -1225,13 +1224,20 @@ nilfs_get_tree(struct fs_context *fc)
 			}
 		} else {
 			/*
-			 * Try remount to setup mount states if the current
+			 * Try reconfigure to setup mount states if the current
 			 * tree is not mounted and only snapshots use this sb.
+			 *
+			 * Since nilfs_reconfigure() requires fc->root to be
+			 * set, set it first and release it on failure.
 			 */
-			fc->root = s->s_root;
+			fc->root = dget(s->s_root);
 			err = nilfs_reconfigure(fc);
-			if (err)
+			if (err) {
+				dput(fc->root);
+				fc->root = NULL;  /* prevent double release */
 				goto failed_super;
+			}
+			return 0;
 		}
 	}
 
