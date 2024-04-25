@@ -659,7 +659,6 @@ static int nilfs_load_super_block(struct the_nilfs *nilfs,
  * init_nilfs - initialize a NILFS instance.
  * @nilfs: the_nilfs structure
  * @sb: super block
- * @data: mount options
  *
  * init_nilfs() performs common initialization per block device (e.g.
  * reading the super block, getting disk layout information, initializing
