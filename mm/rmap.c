@@ -1516,7 +1516,7 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 			}
 		} while (page++, --nr_pages > 0);
 
-		partially_mapped = !!nr && !!atomic_read(mapped);
+		partially_mapped = nr && atomic_read(mapped);
 		break;
 	case RMAP_LEVEL_PMD:
 		atomic_dec(&folio->_large_mapcount);
