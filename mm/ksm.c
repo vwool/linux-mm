@@ -1196,7 +1196,7 @@ static int remove_all_stable_nodes(void)
 
 static int unmerge_and_remove_all_rmap_items(void)
 {
-	struct ksm_mm_slot *mm_slot;
+	struct ksm_mm_slot *ksm_slot;
 	struct mm_slot *slot;
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
@@ -1208,11 +1208,11 @@ static int unmerge_and_remove_all_rmap_items(void)
 	ksm_scan.ksm_slot = mm_slot_entry(slot, struct ksm_mm_slot, slot);
 	spin_unlock(&ksm_mmlist_lock);
 
-	for (mm_slot = ksm_scan.ksm_slot; mm_slot != &ksm_mm_head;
-	     mm_slot = ksm_scan.ksm_slot) {
-		VMA_ITERATOR(vmi, mm_slot->slot.mm, 0);
+	for (ksm_slot = ksm_scan.ksm_slot; ksm_slot != &ksm_mm_head;
+	     ksm_slot = ksm_scan.ksm_slot) {
+		VMA_ITERATOR(vmi, ksm_slot->slot.mm, 0);
 
-		mm = mm_slot->slot.mm;
+		mm = ksm_slot->slot.mm;
 		mmap_read_lock(mm);
 
 		/*
@@ -1232,19 +1232,19 @@ static int unmerge_and_remove_all_rmap_items(void)
 		}
 
 mm_exiting:
-		remove_trailing_rmap_items(&mm_slot->rmap_list);
+		remove_trailing_rmap_items(&ksm_slot->rmap_list);
 		mmap_read_unlock(mm);
 
 		spin_lock(&ksm_mmlist_lock);
-		slot = list_entry(mm_slot->slot.mm_node.next,
+		slot = list_entry(ksm_slot->slot.mm_node.next,
 				  struct mm_slot, mm_node);
 		ksm_scan.ksm_slot = mm_slot_entry(slot, struct ksm_mm_slot, slot);
 		if (ksm_test_exit(mm)) {
-			hash_del(&mm_slot->slot.hash);
-			list_del(&mm_slot->slot.mm_node);
+			hash_del(&ksm_slot->slot.hash);
+			list_del(&ksm_slot->slot.mm_node);
 			spin_unlock(&ksm_mmlist_lock);
 
-			mm_slot_free(mm_slot_cache, mm_slot);
+			mm_slot_free(mm_slot_cache, ksm_slot);
 			clear_bit(MMF_VM_MERGEABLE, &mm->flags);
 			clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
 			mmdrop(mm);
