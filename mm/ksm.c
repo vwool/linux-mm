@@ -2468,7 +2468,7 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 	}
 }
 
-static struct ksm_rmap_item *get_next_rmap_item(struct ksm_mm_slot *mm_slot,
+static struct ksm_rmap_item *get_next_rmap_item(struct ksm_mm_slot *ksm_slot,
 					    struct ksm_rmap_item **rmap_list,
 					    unsigned long addr)
 {
@@ -2488,7 +2488,7 @@ static struct ksm_rmap_item *get_next_rmap_item(struct ksm_mm_slot *mm_slot,
 	rmap_item = alloc_rmap_item();
 	if (rmap_item) {
 		/* It has already been zeroed */
-		rmap_item->mm = mm_slot->slot.mm;
+		rmap_item->mm = ksm_slot->slot.mm;
 		rmap_item->mm->ksm_rmap_items++;
 		rmap_item->address = addr;
 		rmap_item->rmap_list = *rmap_list;
