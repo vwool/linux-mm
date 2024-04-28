@@ -247,7 +247,7 @@ static struct ksm_scan ksm_scan = {
 
 static struct kmem_cache *rmap_item_cache;
 static struct kmem_cache *stable_node_cache;
-static struct kmem_cache *mm_slot_cache;
+static struct kmem_cache *ksm_slot_cache;
 
 /* Default number of pages to scan per batch */
 #define DEFAULT_PAGES_TO_SCAN 100
@@ -502,8 +502,8 @@ static int __init ksm_slab_init(void)
 	if (!stable_node_cache)
 		goto out_free1;
 
-	mm_slot_cache = KSM_KMEM_CACHE(ksm_mm_slot, 0);
-	if (!mm_slot_cache)
+	ksm_slot_cache = KSM_KMEM_CACHE(ksm_mm_slot, 0);
+	if (!ksm_slot_cache)
 		goto out_free2;
 
 	return 0;
@@ -518,10 +518,10 @@ out:
 
 static void __init ksm_slab_free(void)
 {
-	kmem_cache_destroy(mm_slot_cache);
+	kmem_cache_destroy(ksm_slot_cache);
 	kmem_cache_destroy(stable_node_cache);
 	kmem_cache_destroy(rmap_item_cache);
-	mm_slot_cache = NULL;
+	ksm_slot_cache = NULL;
 }
 
 static __always_inline bool is_stable_node_chain(struct ksm_stable_node *chain)
@@ -1244,7 +1244,7 @@ mm_exiting:
 			list_del(&ksm_slot->slot.mm_node);
 			spin_unlock(&ksm_mmlist_lock);
 
-			mm_slot_free(mm_slot_cache, ksm_slot);
+			mm_slot_free(ksm_slot_cache, ksm_slot);
 			clear_bit(MMF_VM_MERGEABLE, &mm->flags);
 			clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
 			mmdrop(mm);
@@ -2716,7 +2716,7 @@ no_vmas:
 		list_del(&ksm_slot->slot.mm_node);
 		spin_unlock(&ksm_mmlist_lock);
 
-		mm_slot_free(mm_slot_cache, ksm_slot);
+		mm_slot_free(ksm_slot_cache, ksm_slot);
 		clear_bit(MMF_VM_MERGEABLE, &mm->flags);
 		clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
 		mmap_read_unlock(mm);
@@ -2975,7 +2975,7 @@ int __ksm_enter(struct mm_struct *mm)
 	struct mm_slot *slot;
 	int needs_wakeup;
 
-	ksm_slot = mm_slot_alloc(mm_slot_cache);
+	ksm_slot = mm_slot_alloc(ksm_slot_cache);
 	if (!ksm_slot)
 		return -ENOMEM;
 
@@ -3043,7 +3043,7 @@ void __ksm_exit(struct mm_struct *mm)
 	spin_unlock(&ksm_mmlist_lock);
 
 	if (easy_to_free) {
-		mm_slot_free(mm_slot_cache, ksm_slot);
+		mm_slot_free(ksm_slot_cache, ksm_slot);
 		clear_bit(MMF_VM_MERGE_ANY, &mm->flags);
 		clear_bit(MMF_VM_MERGEABLE, &mm->flags);
 		mmdrop(mm);
