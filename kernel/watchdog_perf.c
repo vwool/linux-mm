@@ -277,6 +277,8 @@ int __init watchdog_hardlockup_probe(void)
 
 /**
  * hardlockup_config_perf_event - Overwrite config of wd_hw_attr.
+ *
+ * @str: number which identifies the raw perf event to use
  */
 void __init hardlockup_config_perf_event(const char *str)
 {
