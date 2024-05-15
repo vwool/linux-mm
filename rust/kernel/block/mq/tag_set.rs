@@ -39,7 +39,7 @@ impl<T: Operations> TagSet<T> {
     /// Try to create a new tag set
     pub fn new(nr_hw_queues: u32, num_tags: u32, num_maps: u32) -> impl PinInit<Self, Error> {
         let tag_set: bindings::blk_mq_tag_set = pin_init::zeroed();
-        let tag_set: Result<_> = core::mem::size_of::<RequestDataWrapper>()
+        let tag_set: Result<_> = size_of::<RequestDataWrapper<T>>()
             .try_into()
             .map(|cmd_size| {
                 bindings::blk_mq_tag_set {
