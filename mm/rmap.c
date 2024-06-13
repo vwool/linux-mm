@@ -1824,12 +1824,7 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			 */
 			if (unlikely(folio_test_swapbacked(folio) !=
 					folio_test_swapcache(folio))) {
-				/*
-				 * unmap_huge_pmd_locked() will unmark a
-				 * PMD-mapped folio as lazyfree if the folio or
-				 * its PMD was redirtied.
-				 */
-				WARN_ON_ONCE(!pmd_mapped);
+				WARN_ON_ONCE(1);
 				goto walk_done_err;
 			}
 
