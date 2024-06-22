@@ -2693,20 +2693,10 @@ static bool __discard_anon_folio_pmd_locked(struct vm_area_struct *vma,
 					    unsigned long addr, pmd_t *pmdp,
 					    struct folio *folio)
 {
-	VM_WARN_ON_FOLIO(folio_test_swapbacked(folio), folio);
-	VM_WARN_ON_FOLIO(!folio_test_anon(folio), folio);
-
 	struct mm_struct *mm = vma->vm_mm;
 	int ref_count, map_count;
 	pmd_t orig_pmd = *pmdp;
 	struct page *page;
-
-	if (unlikely(!pmd_present(orig_pmd) || !pmd_trans_huge(orig_pmd)))
-		return false;
-
-	page = pmd_page(orig_pmd);
-	if (unlikely(page_folio(page) != folio))
-		return false;
 
 	if (folio_test_dirty(folio) || pmd_dirty(orig_pmd))
 		return false;
