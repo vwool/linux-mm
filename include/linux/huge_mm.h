@@ -267,6 +267,10 @@ unsigned long thp_vma_allowable_orders(struct vm_area_struct *vma,
 	return __thp_vma_allowable_orders(vma, vm_flags, tva_flags, orders);
 }
 
+unsigned long shmem_allowable_huge_orders(struct inode *inode,
+				struct vm_area_struct *vma, pgoff_t index,
+				bool global_huge);
+
 struct thpsize {
 	struct kobject kobj;
 	struct list_head node;
@@ -459,6 +463,13 @@ static inline unsigned long thp_vma_allowable_orders(struct vm_area_struct *vma,
 					unsigned long vm_flags,
 					unsigned long tva_flags,
 					unsigned long orders)
+{
+	return 0;
+}
+
+static inline unsigned long shmem_allowable_huge_orders(struct inode *inode,
+				struct vm_area_struct *vma, pgoff_t index,
+				bool global_huge)
 {
 	return 0;
 }
