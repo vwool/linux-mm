@@ -145,10 +145,14 @@ static void chdir_to_tmpfs(void)
 static void copy_fromat_to(int fromfd, const char *fromname, const char *toname)
 {
 	int from = openat(fromfd, fromname, O_RDONLY);
-	if (from == -1)
+	if (from < 0)
 		ksft_exit_fail_msg("open copy source - %s\n", strerror(errno));
 
 	int to = open(toname, O_CREAT | O_WRONLY | O_EXCL, 0700);
+	if (to < 0) {
+		close(from);
+		ksft_exit_fail_msg("open copy destination - %s\n", strerror(errno));
+	}
 
 	while (true) {
 		char buf[4096];
