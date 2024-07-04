@@ -1224,7 +1224,7 @@ void __free_pages_core(struct page *page, unsigned int order,
 {
 	unsigned int nr_pages = 1 << order;
 	struct page *p = page;
-	unsigned int loop;
+	unsigned int loop = 0;
 
 	/*
 	 * When initializing the memmap, __init_single_page() sets the refcount
@@ -1236,10 +1236,13 @@ void __free_pages_core(struct page *page, unsigned int order,
 	 */
 	if (IS_ENABLED(CONFIG_MEMORY_HOTPLUG) &&
 	    unlikely(context == MEMINIT_HOTPLUG)) {
-		for (loop = 0; loop < nr_pages; loop++, p++) {
+		for (;;) {
 			VM_WARN_ON_ONCE(PageReserved(p));
 			__ClearPageOffline(p);
 			set_page_count(p, 0);
+			if (++loop >= nr_pages)
+				break;
+			p++;
 		}
 
 		/*
@@ -1250,9 +1253,12 @@ void __free_pages_core(struct page *page, unsigned int order,
 		debug_pagealloc_map_pages(page, nr_pages);
 		adjust_managed_page_count(page, nr_pages);
 	} else {
-		for (loop = 0; loop < nr_pages; loop++, p++) {
+		for (;;) {
 			__ClearPageReserved(p);
 			set_page_count(p, 0);
+			if (++loop >= nr_pages)
+				break;
+			p++;
 		}
 
 		/* memblock adjusts totalram_pages() manually. */
