@@ -51,6 +51,7 @@ static const struct bus_type memory_tier_subsys = {
 	.dev_name = "memory_tier",
 };
 
+#ifdef CONFIG_NUMA_BALANCING
 /**
  * folio_has_cpupid - check if a folio has cpupid information
  * @folio: folio to check
@@ -66,6 +67,7 @@ bool folio_has_cpupid(struct folio *folio)
 	return !(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) ||
 	       node_is_toptier(folio_nid(folio));
 }
+#endif
 
 #ifdef CONFIG_MIGRATION
 static int top_tier_adistance;
