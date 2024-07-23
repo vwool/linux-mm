@@ -26,6 +26,7 @@ struct page_counter {
 	atomic_long_t children_low_usage;
 
 	unsigned long watermark;
+	unsigned long local_watermark; /* track min of fd-local resets */
 	unsigned long failcnt;
 
 	/* Keep all the read most fields in a separete cacheline. */
@@ -78,7 +79,10 @@ int page_counter_memparse(const char *buf, const char *max,
 
 static inline void page_counter_reset_watermark(struct page_counter *counter)
 {
-	counter->watermark = page_counter_read(counter);
+	unsigned long usage = page_counter_read(counter);
+
+	counter->watermark = usage;
+	counter->local_watermark = usage;
 }
 
 void page_counter_calculate_protection(struct page_counter *root,
