@@ -38,8 +38,8 @@ struct reclaim_stat {
 enum vm_stat_item {
 	NR_DIRTY_THRESHOLD,
 	NR_DIRTY_BG_THRESHOLD,
-	NR_MEMMAP,	/* page metadata allocated through buddy allocator */
-	NR_MEMMAP_BOOT,	/* page metadata allocated through boot allocator */
+	NR_MEMMAP_PAGES,	/* page metadata allocated through buddy allocator */
+	NR_MEMMAP_BOOT_PAGES,	/* page metadata allocated through boot allocator */
 	NR_VM_STAT_ITEMS,
 };
 
@@ -620,6 +620,6 @@ static inline void lruvec_stat_sub_folio(struct folio *folio,
 	lruvec_stat_mod_folio(folio, idx, -folio_nr_pages(folio));
 }
 
-void mod_memmap_boot(long delta);
-void mod_memmap(long delta);
+void memmap_boot_pages_add(long delta);
+void memmap_pages_add(long delta);
 #endif /* _LINUX_VMSTAT_H */

@@ -1035,19 +1035,20 @@ unsigned long node_page_state(struct pglist_data *pgdat,
 
 /*
  * Count number of pages "struct page" and "struct page_ext" consume.
- * nr_memmap_boot: # of pages allocated by boot allocator & not part of MemTotal
- * nr_memmap: # of pages that were allocated by buddy allocator
+ * nr_memmap_boot_pages: # of pages allocated by boot allocator
+ * nr_memmap_pages: # of pages that were allocated by buddy allocator
  */
-static atomic_long_t nr_memmap_boot, nr_memmap;
+static atomic_long_t nr_memmap_boot_pages = ATOMIC_LONG_INIT(0);
+static atomic_long_t nr_memmap_pages = ATOMIC_LONG_INIT(0);
 
-void mod_memmap_boot(long delta)
+void memmap_boot_pages_add(long delta)
 {
-	atomic_long_add(delta, &nr_memmap_boot);
+	atomic_long_add(delta, &nr_memmap_boot_pages);
 }
 
-void mod_memmap(long delta)
+void memmap_pages_add(long delta)
 {
-	atomic_long_add(delta, &nr_memmap);
+	atomic_long_add(delta, &nr_memmap_pages);
 }
 
 #ifdef CONFIG_COMPACTION
@@ -1844,8 +1845,8 @@ static void *vmstat_start(struct seq_file *m, loff_t *pos)
 
 	global_dirty_limits(v + NR_DIRTY_BG_THRESHOLD,
 			    v + NR_DIRTY_THRESHOLD);
-	v[NR_MEMMAP_BOOT] = atomic_long_read(&nr_memmap_boot);
-	v[NR_MEMMAP] = atomic_long_read(&nr_memmap);
+	v[NR_MEMMAP_PAGES] = atomic_long_read(&nr_memmap_pages);
+	v[NR_MEMMAP_BOOT_PAGES] = atomic_long_read(&nr_memmap_boot_pages);
 	v += NR_VM_STAT_ITEMS;
 
 #ifdef CONFIG_VM_EVENT_COUNTERS
