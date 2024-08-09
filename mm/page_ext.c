@@ -214,7 +214,7 @@ static int __init alloc_node_page_ext(int nid)
 		return -ENOMEM;
 	NODE_DATA(nid)->node_page_ext = base;
 	total_usage += table_size;
-	mod_memmap_boot(DIV_ROUND_UP(table_size, PAGE_SIZE));
+	memmap_boot_pages_add(DIV_ROUND_UP(table_size, PAGE_SIZE));
 	return 0;
 }
 
@@ -275,7 +275,7 @@ static void *__meminit alloc_page_ext(size_t size, int nid)
 		addr = vzalloc_node(size, nid);
 
 	if (addr)
-		mod_memmap(DIV_ROUND_UP(size, PAGE_SIZE));
+		memmap_pages_add(DIV_ROUND_UP(size, PAGE_SIZE));
 
 	return addr;
 }
@@ -322,7 +322,7 @@ static void free_page_ext(void *addr)
 	struct page *page;
 
 	table_size = page_ext_size * PAGES_PER_SECTION;
-	mod_memmap(-1L * (DIV_ROUND_UP(table_size, PAGE_SIZE)));
+	memmap_pages_add(-1L * (DIV_ROUND_UP(table_size, PAGE_SIZE)));
 
 	if (is_vmalloc_addr(addr)) {
 		vfree(addr);
