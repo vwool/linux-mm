@@ -4563,9 +4563,8 @@ static void slab_free_after_rcu_debug(struct rcu_head *rcu_head)
 		return;
 
 	/* resume freeing */
-	if (!slab_free_hook(s, object, slab_want_init_on_free(s), true))
-		return;
-	do_slab_free(s, slab, object, object, 1, _THIS_IP_);
+	if (slab_free_hook(s, object, slab_want_init_on_free(s), true))
+		do_slab_free(s, slab, object, object, 1, _THIS_IP_);
 }
 #endif /* CONFIG_SLUB_RCU_DEBUG */
 

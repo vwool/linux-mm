@@ -576,15 +576,6 @@ void kmem_cache_destroy(struct kmem_cache *s)
 	if (unlikely(!s) || !kasan_check_byte(s))
 		return;
 
-	cpus_read_lock();
-	mutex_lock(&slab_mutex);
-
-	rcu_set = s->flags & SLAB_TYPESAFE_BY_RCU;
-
-	s->refcount--;
-	if (s->refcount)
-		goto out_unlock;
-
 	if (IS_ENABLED(CONFIG_SLUB_RCU_DEBUG) &&
 	    (s->flags & SLAB_TYPESAFE_BY_RCU)) {
 		/*
@@ -593,9 +584,22 @@ void kmem_cache_destroy(struct kmem_cache *s)
 		 * defer their freeing with call_rcu().
 		 * Wait for such call_rcu() invocations here before actually
 		 * destroying the cache.
+		 *
+		 * It doesn't matter that we haven't looked at the slab refcount
+		 * yet - slabs with SLAB_TYPESAFE_BY_RCU can't be merged, so
+		 * the refcount should be 1 here.
 		 */
 		rcu_barrier();
 	}
+
+	cpus_read_lock();
+	mutex_lock(&slab_mutex);
+
+	rcu_set = s->flags & SLAB_TYPESAFE_BY_RCU;
+
+	s->refcount--;
+	if (s->refcount)
+		goto out_unlock;
 
 	err = shutdown_cache(s);
 	WARN(err, "%s %s: Slab cache still has objects when called from %pS",
