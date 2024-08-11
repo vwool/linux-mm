@@ -681,6 +681,15 @@ extern void prep_compound_page(struct page *page, unsigned int order);
 
 extern void post_alloc_hook(struct page *page, unsigned int order,
 					gfp_t gfp_flags);
+
+static inline struct page *post_alloc_hook_noprof(struct page *page, unsigned int order,
+						  gfp_t gfp_flags)
+{
+	post_alloc_hook(page, order, __GFP_MOVABLE);
+	return page;
+}
+#define mark_allocated(...) alloc_hooks(post_alloc_hook_noprof(__VA_ARGS__))
+
 extern bool free_pages_prepare(struct page *page, unsigned int order);
 
 extern int user_min_free_kbytes;
