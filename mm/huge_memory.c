@@ -3452,6 +3452,7 @@ void __folio_undo_large_rmappable(struct folio *folio)
 	spin_unlock_irqrestore(&ds_queue->split_queue_lock, flags);
 }
 
+/* partially_mapped=false won't clear PG_partially_mapped folio flag */
 void deferred_split_folio(struct folio *folio, bool partially_mapped)
 {
 	struct deferred_split *ds_queue = get_deferred_split_queue(folio);
@@ -3481,16 +3482,17 @@ void deferred_split_folio(struct folio *folio, bool partially_mapped)
 		return;
 
 	spin_lock_irqsave(&ds_queue->split_queue_lock, flags);
-	if (partially_mapped)
-		folio_set_partially_mapped(folio);
-	else
-		folio_clear_partially_mapped(folio);
-	if (list_empty(&folio->_deferred_list)) {
-		if (partially_mapped) {
+	if (partially_mapped) {
+		if (!folio_test_set_partially_mapped(folio)) {
 			if (folio_test_pmd_mappable(folio))
 				count_vm_event(THP_DEFERRED_SPLIT_PAGE);
 			count_mthp_stat(folio_order(folio), MTHP_STAT_SPLIT_DEFERRED);
 		}
+	} else {
+		/* partially mapped folios cannot become non-partially mapped */
+		VM_WARN_ON_FOLIO(folio_test_partially_mapped(folio), folio);
+	}
+	if (list_empty(&folio->_deferred_list)) {
 		list_add_tail(&folio->_deferred_list, &ds_queue->split_queue);
 		ds_queue->split_queue_len++;
 #ifdef CONFIG_MEMCG
