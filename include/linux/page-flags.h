@@ -863,6 +863,7 @@ static inline void ClearPageCompound(struct page *page)
 }
 FOLIO_FLAG(large_rmappable, FOLIO_SECOND_PAGE)
 FOLIO_FLAG(partially_mapped, FOLIO_SECOND_PAGE)
+FOLIO_TEST_SET_FLAG(partially_mapped, FOLIO_SECOND_PAGE)
 #else
 FOLIO_FLAG_FALSE(large_rmappable)
 FOLIO_FLAG_FALSE(partially_mapped)
