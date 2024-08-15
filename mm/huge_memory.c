@@ -3152,7 +3152,7 @@ static void __split_huge_page(struct page *page, struct list_head *list,
 
 			folio_clear_active(new_folio);
 			folio_clear_unevictable(new_folio);
-			if (!folio_batch_add(&free_folios, folio)) {
+			if (!folio_batch_add(&free_folios, new_folio)) {
 				mem_cgroup_uncharge_folios(&free_folios);
 				free_unref_folios(&free_folios);
 			}
