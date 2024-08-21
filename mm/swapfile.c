@@ -1514,6 +1514,8 @@ static bool __swap_entries_free(struct swap_info_struct *si,
 	unlock_cluster_or_swap_info(si, ci);
 
 	if (!has_cache) {
+		for (i = 0; i < nr; i++)
+			zswap_invalidate(swp_entry(si->type, offset + i));
 		spin_lock(&si->lock);
 		swap_entry_range_free(si, entry, nr);
 		spin_unlock(&si->lock);
