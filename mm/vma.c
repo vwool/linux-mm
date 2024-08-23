@@ -719,13 +719,13 @@ static void vms_complete_munmap_vmas(struct vma_munmap_struct *vms,
 	update_hiwater_vm(mm);
 	/* Stat accounting */
 	WRITE_ONCE(mm->total_vm, READ_ONCE(mm->total_vm) - vms->nr_pages);
-	mm->exec_vm -= vms->exec_vm;
-	mm->stack_vm -= vms->stack_vm;
-	mm->data_vm -= vms->data_vm;
 	/* Paranoid bookkeeping */
 	VM_WARN_ON(vms->exec_vm > mm->exec_vm);
 	VM_WARN_ON(vms->stack_vm > mm->stack_vm);
 	VM_WARN_ON(vms->data_vm > mm->data_vm);
+	mm->exec_vm -= vms->exec_vm;
+	mm->stack_vm -= vms->stack_vm;
+	mm->data_vm -= vms->data_vm;
 
 	/* Remove and clean up vmas */
 	mas_set(mas_detach, 0);
