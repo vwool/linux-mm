@@ -52,6 +52,13 @@ struct vma_munmap_struct {
 	unsigned long data_vm;
 };
 
+enum vma_merge_state {
+	VMA_MERGE_START,
+	VMA_MERGE_ERROR_NOMEM,
+	VMA_MERGE_NOMERGE,
+	VMA_MERGE_SUCCESS,
+};
+
 /* Represents a VMA merge operation. */
 struct vma_merge_struct {
 	struct mm_struct *mm;
@@ -68,7 +75,13 @@ struct vma_merge_struct {
 	struct mempolicy *policy;
 	struct vm_userfaultfd_ctx uffd_ctx;
 	struct anon_vma_name *anon_name;
+	enum vma_merge_state state;
 };
+
+static inline bool vmg_nomem(struct vma_merge_struct *vmg)
+{
+	return vmg->state == VMA_MERGE_ERROR_NOMEM;
+}
 
 /* Assumes addr >= vma->vm_start. */
 static inline pgoff_t vma_pgoff_offset(struct vm_area_struct *vma,
@@ -85,6 +98,7 @@ static inline pgoff_t vma_pgoff_offset(struct vm_area_struct *vma,
 		.end = end_,						\
 		.flags = flags_,					\
 		.pgoff = pgoff_,					\
+		.state = VMA_MERGE_START,				\
 	}
 
 #define VMG_VMA_STATE(name, vmi_, prev_, vma_, start_, end_)	\
@@ -103,6 +117,7 @@ static inline pgoff_t vma_pgoff_offset(struct vm_area_struct *vma,
 		.policy = vma_policy(vma_),			\
 		.uffd_ctx = vma_->vm_userfaultfd_ctx,		\
 		.anon_name = anon_vma_name(vma_),		\
+		.state = VMA_MERGE_START,			\
 	}
 
 #ifdef CONFIG_DEBUG_VM_MAPLE_TREE
@@ -306,10 +321,7 @@ struct vm_area_struct
 		       unsigned long new_flags,
 		       struct vm_userfaultfd_ctx new_ctx);
 
-struct vm_area_struct
-*vma_merge_new_vma(struct vma_iterator *vmi, struct vm_area_struct *prev,
-		   struct vm_area_struct *vma, unsigned long start,
-		   unsigned long end, pgoff_t pgoff);
+struct vm_area_struct *vma_merge_new_range(struct vma_merge_struct *vmg);
 
 struct vm_area_struct *vma_merge_extend(struct vma_iterator *vmi,
 					struct vm_area_struct *vma,
