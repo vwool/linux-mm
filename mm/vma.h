@@ -225,6 +225,7 @@ static inline int vma_iter_store_gfp(struct vma_iterator *vmi,
 }
 
 
+#ifdef CONFIG_MMU
 /*
  * These three helpers classifies VMAs for virtual memory accounting.
  */
@@ -255,6 +256,7 @@ static inline bool is_data_mapping(vm_flags_t flags)
 {
 	return (flags & (VM_WRITE | VM_SHARED | VM_STACK)) == VM_WRITE;
 }
+#endif
 
 
 static inline void vma_iter_config(struct vma_iterator *vmi,
