@@ -2003,6 +2003,9 @@ static int shmem_split_large_entry(struct inode *inode, pgoff_t index,
 	void *alloced_shadow = NULL;
 	int alloced_order = 0, i;
 
+	/* Convert user data gfp flags to xarray node gfp flags */
+	gfp &= GFP_RECLAIM_MASK;
+
 	for (;;) {
 		int order = -1, split_order = 0;
 		void *old = NULL;
