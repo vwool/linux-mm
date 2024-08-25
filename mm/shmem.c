@@ -1459,6 +1459,7 @@ static int shmem_writepage(struct page *page, struct writeback_control *wbc)
 	swp_entry_t swap;
 	pgoff_t index;
 	int nr_pages;
+	bool split = false;
 
 	/*
 	 * Our capabilities prevent regular writeback or sync from ever calling
@@ -1480,8 +1481,20 @@ static int shmem_writepage(struct page *page, struct writeback_control *wbc)
 	 * If /sys/kernel/mm/transparent_hugepage/shmem_enabled is "always" or
 	 * "force", drivers/gpu/drm/i915/gem/i915_gem_shmem.c gets huge pages,
 	 * and its shmem_writeback() needs them to be split when swapping.
+	 *
+	 * And shrinkage of pages beyond i_size does not split swap, so
+	 * swapout of a large folio crossing i_size needs to split too
+	 * (unless fallocate has been used to preallocate beyond EOF).
 	 */
-	if (wbc->split_large_folio && folio_test_large(folio)) {
+	if (folio_test_large(folio)) {
+		split = wbc->split_large_folio;
+		index = shmem_fallocend(inode,
+			DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE));
+		if (index > folio->index && index < folio_next_index(folio))
+			split = true;
+	}
+
+	if (split) {
 try_split:
 		/* Ensure the subpages are still dirty */
 		folio_test_set_dirty(folio);
