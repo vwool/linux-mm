@@ -80,7 +80,7 @@ on an additional LRU list for a few reasons:
  (2) We want to be able to migrate unevictable folios between nodes for memory
      defragmentation, workload management and memory hotplug.  The Linux kernel
      can only migrate folios that it can successfully isolate from the LRU
-     lists (or "Movable" pages: outside of consideration here).  If we were to
+     lists (or "Movable" folios: outside of consideration here).  If we were to
      maintain folios elsewhere than on an LRU-like list, where they can be
      detected by folio_isolate_lru(), we would prevent their migration.
 
