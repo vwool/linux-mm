@@ -159,6 +159,7 @@ static inline void reattach_vmas(struct ma_state *mas_detach)
 static inline void vms_abort_munmap_vmas(struct vma_munmap_struct *vms,
 		struct ma_state *mas_detach)
 {
+	struct ma_state *mas = &vms->vmi->mas;
 	if (!vms->nr_pages)
 		return;
 
@@ -170,13 +171,14 @@ static inline void vms_abort_munmap_vmas(struct vma_munmap_struct *vms,
 	 * not symmetrical and state data has been lost.  Resort to the old
 	 * failure method of leaving a gap where the MAP_FIXED mapping failed.
 	 */
-	if (unlikely(vma_iter_store_gfp(vms->vmi, NULL, GFP_KERNEL))) {
+	mas_set_range(mas, vms->start, vms->end);
+	if (unlikely(mas_store_gfp(mas, NULL, GFP_KERNEL))) {
 		pr_warn_once("%s: (%d) Unable to abort munmap() operation\n",
 			     current->comm, current->pid);
 		/* Leaving vmas detached and in-tree may hamper recovery */
 		reattach_vmas(mas_detach);
 	} else {
-		/* Clean up the insertion of unfortunate the gap */
+		/* Clean up the insertion of the unfortunate gap */
 		vms_complete_munmap_vmas(vms, mas_detach);
 	}
 }
