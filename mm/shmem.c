@@ -1996,10 +1996,10 @@ static void shmem_set_folio_swapin_error(struct inode *inode, pgoff_t index,
 }
 
 static int shmem_split_large_entry(struct inode *inode, pgoff_t index,
-				   swp_entry_t swap, int new_order, gfp_t gfp)
+				   swp_entry_t swap, gfp_t gfp)
 {
 	struct address_space *mapping = inode->i_mapping;
-	XA_STATE_ORDER(xas, &mapping->i_pages, index, new_order);
+	XA_STATE_ORDER(xas, &mapping->i_pages, index, 0);
 	void *alloced_shadow = NULL;
 	int alloced_order = 0, i;
 
@@ -2027,7 +2027,7 @@ static int shmem_split_large_entry(struct inode *inode, pgoff_t index,
 		}
 
 		/* Try to split large swap entry in pagecache */
-		if (order > 0 && order > new_order) {
+		if (order > 0) {
 			if (!alloced_order) {
 				split_order = order;
 				goto unlock;
@@ -2038,7 +2038,7 @@ static int shmem_split_large_entry(struct inode *inode, pgoff_t index,
 			 * Re-set the swap entry after splitting, and the swap
 			 * offset of the original large entry must be continuous.
 			 */
-			for (i = 0; i < 1 << order; i += (1 << new_order)) {
+			for (i = 0; i < 1 << order; i++) {
 				pgoff_t aligned_index = round_down(index, 1 << order);
 				swp_entry_t tmp;
 
@@ -2124,7 +2124,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 		 * should split the large swap entry stored in the pagecache
 		 * if necessary.
 		 */
-		split_order = shmem_split_large_entry(inode, index, swap, 0, gfp);
+		split_order = shmem_split_large_entry(inode, index, swap, gfp);
 		if (split_order < 0) {
 			error = split_order;
 			goto failed;
