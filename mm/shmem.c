@@ -1899,11 +1899,13 @@ static int shmem_replace_folio(struct folio **foliop, gfp_t gfp,
 	 * limit chance of success by further cpuset and node constraints.
 	 */
 	gfp &= ~GFP_CONSTRAINT_MASK;
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	if (nr_pages > 1) {
 		gfp_t huge_gfp = vma_thp_gfp_mask(vma);
 
 		gfp = limit_gfp_mask(huge_gfp, gfp);
 	}
+#endif
 
 	new = shmem_alloc_folio(gfp, folio_order(old), info, index);
 	if (!new)
