@@ -685,7 +685,7 @@ next:
 		if (!folio || xa_is_value(folio))
 			goto drop;
 
-		/* No large page at the end of the file: nothing to split */
+		/* No large folio at the end of the file: nothing to split */
 		if (!folio_test_large(folio)) {
 			folio_put(folio);
 			goto drop;
