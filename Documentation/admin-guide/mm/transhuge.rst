@@ -552,9 +552,9 @@ split_deferred
         be split under memory pressure, if splitting is possible.
 
 nr_anon
-       the number of transparent anon huge pages we have in the whole system.
-       These huge pages could be entirely mapped or have partially
-       unmapped/unused subpages.
+       the number of anonymous THP we have in the whole system. These THPs
+       might be currently entirely mapped or have partially unmapped/unused
+       subpages.
 
 As the system ages, allocating huge pages may be expensive as the
 system uses memory compaction to copy data around memory to free a
