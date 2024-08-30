@@ -1049,6 +1049,7 @@ restart:
 		if (cmpxchg(&iter->position, pos, memcg) != pos) {
 			if (css && css != &root->css)
 				css_put(css);
+			memcg = NULL;
 			goto restart;
 		}
 
