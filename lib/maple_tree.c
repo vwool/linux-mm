@@ -2220,7 +2220,7 @@ static inline void mas_wr_node_walk(struct ma_wr_state *wr_mas)
 	while (offset < count && mas->index > wr_mas->pivots[offset])
 		offset++;
 
-	wr_mas->r_max = offset < count ? wr_mas->pivots[offset] : mas->max;
+	wr_mas->r_max = mas_safe_pivot(mas, wr_mas->pivots, offset, wr_mas->type);
 	wr_mas->r_min = mas_safe_min(mas, wr_mas->pivots, offset);
 	wr_mas->offset_end = mas->offset = offset;
 }
@@ -3927,11 +3927,9 @@ static inline void mas_wr_extend_null(struct ma_wr_state *wr_mas)
 		    (mas->end != wr_mas->offset_end) &&
 		    !wr_mas->slots[wr_mas->offset_end + 1]) {
 			wr_mas->offset_end++;
-			if (wr_mas->offset_end == mas->end)
-				mas->last = mas->max;
-			else
-				mas->last = wr_mas->pivots[wr_mas->offset_end];
-			wr_mas->end_piv = mas->last;
+			wr_mas->end_piv = mas->last =
+				mas_safe_pivot(mas, wr_mas->pivots,
+					wr_mas->offset_end, wr_mas->type);
 		}
 	}
 
@@ -3956,10 +3954,8 @@ static inline void mas_wr_end_piv(struct ma_wr_state *wr_mas)
 	       (wr_mas->mas->last > wr_mas->pivots[wr_mas->offset_end]))
 		wr_mas->offset_end++;
 
-	if (wr_mas->offset_end < wr_mas->mas->end)
-		wr_mas->end_piv = wr_mas->pivots[wr_mas->offset_end];
-	else
-		wr_mas->end_piv = wr_mas->mas->max;
+	wr_mas->end_piv = mas_safe_pivot(wr_mas->mas, wr_mas->pivots,
+				wr_mas->offset_end, wr_mas->type);
 }
 
 static inline unsigned char mas_wr_new_end(struct ma_wr_state *wr_mas)
