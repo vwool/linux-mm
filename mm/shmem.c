@@ -1673,7 +1673,7 @@ unsigned long shmem_allowable_huge_orders(struct inode *inode,
 		return 0;
 
 	global_huge = shmem_huge_global_enabled(inode, index, write_end,
-		       				shmem_huge_force, vma, vm_flags);
+					shmem_huge_force, vma, vm_flags);
 	if (!vma || !vma_is_anon_shmem(vma)) {
 		/*
 		 * For tmpfs, we now only support PMD sized THP if huge page
@@ -2436,7 +2436,7 @@ unlock:
  * Return: 0 if successful, else a negative error code.
  */
 int shmem_get_folio(struct inode *inode, pgoff_t index, loff_t write_end,
-	       	struct folio **foliop, enum sgp_type sgp)
+		    struct folio **foliop, enum sgp_type sgp)
 {
 	return shmem_get_folio_gfp(inode, index, write_end, foliop, sgp,
 			mapping_gfp_mask(inode->i_mapping), NULL, NULL);
