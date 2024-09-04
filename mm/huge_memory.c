@@ -606,8 +606,6 @@ static struct attribute *anon_stats_attrs[] = {
 	&swpout_attr.attr,
 	&swpout_fallback_attr.attr,
 #endif
-	&split_attr.attr,
-	&split_failed_attr.attr,
 	&split_deferred_attr.attr,
 	NULL,
 };
@@ -636,6 +634,8 @@ static struct attribute *any_stats_attrs[] = {
 	&swpout_attr.attr,
 	&swpout_fallback_attr.attr,
 #endif
+	&split_attr.attr,
+	&split_failed_attr.attr,
 	NULL,
 };
 
