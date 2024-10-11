@@ -1065,20 +1065,30 @@ static void execmem_fill_trapping_insns(void *ptr, size_t size, bool writeable)
 struct execmem_info __init *execmem_arch_setup(void)
 {
 	unsigned long start, offset = 0;
+	enum execmem_range_flags flags;
+	pgprot_t pgprot;
 
 	if (kaslr_enabled())
 		offset = get_random_u32_inclusive(1, 1024) * PAGE_SIZE;
 
 	start = MODULES_VADDR + offset;
 
+	if (IS_ENABLED(CONFIG_X86_64)) {
+		pgprot = PAGE_KERNEL_ROX;
+		flags = EXECMEM_KASAN_SHADOW | EXECMEM_ROX_CACHE;
+	} else {
+		pgprot = PAGE_KERNEL;
+		flags = EXECMEM_KASAN_SHADOW;
+	}
+
 	execmem_info = (struct execmem_info){
 		.fill_trapping_insns = execmem_fill_trapping_insns,
 		.ranges = {
 			[EXECMEM_MODULE_TEXT] = {
-				.flags	= EXECMEM_KASAN_SHADOW | EXECMEM_ROX_CACHE,
+				.flags	= flags,
 				.start	= start,
 				.end	= MODULES_END,
-				.pgprot	= PAGE_KERNEL_ROX,
+				.pgprot	= pgprot,
 				.alignment = MODULE_ALIGN,
 			},
 			[EXECMEM_KPROBES ... EXECMEM_BPF] = {
