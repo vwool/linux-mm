@@ -3480,7 +3480,10 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 		/* don't round down the first address */
 		addr = i ? (*first & PMD_MASK) + i * PMD_SIZE : *first;
 
-		if (pmd_present(pmd[i]) && !pmd_trans_huge(pmd[i])) {
+		if (!pmd_present(pmd[i]))
+			goto next;
+
+		if (!pmd_trans_huge(pmd[i])) {
 			if (!walk->force_scan && should_clear_pmd_young() &&
 			    !mm_has_notifiers(args->mm))
 				pmdp_test_and_clear_young(vma, addr, pmd + i);
