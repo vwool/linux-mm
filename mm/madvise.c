@@ -1713,8 +1713,14 @@ static ssize_t vector_madvise(struct mm_struct *mm, struct iov_iter *iter,
 		 * we have already rescinded locks, it should be no problem to
 		 * simply try again.
 		 */
-		if (ret == -ERESTARTNOINTR)
+		if (ret == -ERESTARTNOINTR) {
+			if (fatal_signal_pending(current)) {
+				ret = -EINTR;
+				break;
+			}
+			cond_resched();
 			continue;
+		}
 		if (ret < 0)
 			break;
 		iov_iter_advance(iter, iter_iov_len(iter));
