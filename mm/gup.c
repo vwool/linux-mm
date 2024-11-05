@@ -2435,8 +2435,8 @@ check_and_migrate_movable_pages_or_folios(struct pages_or_folios *pofs)
 	LIST_HEAD(movable_folio_list);
 	unsigned long collected;
 
-	collected =
-		collect_longterm_unpinnable_folios(&movable_folio_list, pofs);
+	collected = collect_longterm_unpinnable_folios(&movable_folio_list,
+						       pofs);
 	if (!collected)
 		return 0;
 
