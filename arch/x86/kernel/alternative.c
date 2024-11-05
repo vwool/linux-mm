@@ -1241,7 +1241,7 @@ static void cfi_rewrite_endbr(s32 *start, s32 *end, struct module *mod)
 		void *addr = (void *)s + *s;
 		void *wr_addr = module_writable_address(mod, addr);
 
-		poison_endbr(addr+16, wr_addr, false);
+		poison_endbr(addr + 16, wr_addr + 16, false);
 	}
 }
 
