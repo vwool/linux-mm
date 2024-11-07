@@ -2399,7 +2399,7 @@ migrate_longterm_unpinnable_folios(struct list_head *movable_folio_list,
 		 * calling folio_isolate_lru() which takes a reference so the
 		 * folio won't be freed if it's migrating.
 		 */
-		unpin_folio(pofs_get_folio(pofs, i));
+		unpin_folio(folio);
 		pofs_clear_entry(pofs, i);
 	}
 
