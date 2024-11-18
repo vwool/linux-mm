@@ -339,6 +339,11 @@ When **installing** page table entries, the mmap or VMA lock must be held to
 keep the VMA stable. We explore why this is in the page table locking details
 section below.
 
+.. warning:: Page tables are normally only traversed in regions covered by VMAs.
+             If you want to traverse page tables in areas that might not be
+             covered by VMAs, heavier locking is required.
+             See :c:func:`!walk_page_range_novma` for details.
+
 **Freeing** page tables is an entirely internal memory management operation and
 has special requirements (see the page freeing section below for more details).
 
@@ -450,6 +455,9 @@ the time of writing of this document.
 Locking Implementation Details
 ------------------------------
 
+.. warning:: Locking rules for PTE-level page tables are very different from
+             locking rules for page tables at other levels.
+
 Page table locking details
 --------------------------
 
@@ -470,8 +478,12 @@ additional locks dedicated to page tables:
 These locks represent the minimum required to interact with each page table
 level, but there are further requirements.
 
-Importantly, note that on a **traversal** of page tables, no such locks are
-taken. Whether care is taken on reading the page table entries depends on the
+Importantly, note that on a **traversal** of page tables, sometimes no such
+locks are taken. However, at the PTE level, at least concurrent page table
+deletion must be prevented (using RCU) and the page table must be mapped into
+high memory, see below.
+
+Whether care is taken on reading the page table entries depends on the
 architecture, see the section on atomicity below.
 
 Locking rules
@@ -489,12 +501,6 @@ We establish basic locking rules when interacting with page tables:
   the warning below).
 * As mentioned previously, zapping can be performed while simply keeping the VMA
   stable, that is holding any one of the mmap, VMA or rmap locks.
-* Special care is required for PTEs, as on 32-bit architectures these must be
-  mapped into high memory and additionally, careful consideration must be
-  applied to racing with THP, migration or other concurrent kernel operations
-  that might steal the entire PTE table from under us. All this is handled by
-  :c:func:`!pte_offset_map_lock` (see the section on page table installation
-  below for more details).
 
 .. warning:: Populating previously empty entries is dangerous as, when unmapping
              VMAs, :c:func:`!vms_clear_ptes` has a window of time between
@@ -509,8 +515,28 @@ We establish basic locking rules when interacting with page tables:
 There are additional rules applicable when moving page tables, which we discuss
 in the section on this topic below.
 
-.. note:: Interestingly, :c:func:`!pte_offset_map_lock` holds an RCU read lock
-          while the PTE page table lock is held.
+PTE-level page tables are different from page tables at other levels, and there
+are extra requirements for accessing them:
+
+* On 32-bit architectures, they may be in high memory (meaning they need to be
+  mapped into kernel memory to be accessible).
+* When empty, they can be unlinked and RCU-freed while holding an mmap lock or
+  rmap lock for reading in combination with the PTE and PMD page table locks.
+  In particular, this happens in :c:func:`!retract_page_tables` when handling
+  :c:macro:`!MADV_COLLAPSE`.
+  So accessing PTE-level page tables requires at least holding an RCU read lock;
+  but that only suffices for readers that can tolerate racing with concurrent
+  page table updates such that an empty PTE is observed (in a page table that
+  has actually already been detached and marked for RCU freeing) while another
+  new page table has been installed in the same location and filled with
+  entries. Writers normally need to take the PTE lock and revalidate that the
+  PMD entry still refers to the same PTE-level page table.
+
+To access PTE-level page tables, a helper like :c:func:`!pte_offset_map_lock` or
+:c:func:`!pte_offset_map` can be used depending on stability requirements.
+These map the page table into kernel memory if required, take the RCU lock, and
+depending on variant, may also look up or acquire the PTE lock.
+See the comment on :c:func:`!__pte_offset_map_lock`.
 
 Atomicity
 ^^^^^^^^^
