@@ -411,8 +411,10 @@ static int yas537_measure(struct yas5xx *yas5xx, u16 *t, u16 *x, u16 *y1, u16 *y
 		h[1] = (c->k * (c->a4 * s[0] + c->a5 * s[1] + c->a6 * s[2])) / BIT(13);
 		h[2] = (c->k * (c->a7 * s[0] + c->a8 * s[1] + c->a9 * s[2])) / BIT(13);
 		for (i = 0; i < 3; i++) {
-			clamp_val(h[i], -BIT(13), BIT(13) - 1);
-			xy1y2[i] = h[i] + BIT(13);
+			if (h[i] < (s32)-BIT(13))
+				h[i] = (s32)-BIT(13);
+			if (h[i] > (s32)BIT(13) - 1)
+				h[i] = (s32)BIT(13) - 1;
 		}
 	}
 
