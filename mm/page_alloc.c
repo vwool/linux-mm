@@ -1225,24 +1225,50 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	spin_unlock_irqrestore(&zone->lock, flags);
 }
 
-/* Split a multi-block free page into its individual pageblocks. */
-static void split_large_buddy(struct zone *zone, struct page *page,
-			      unsigned long pfn, int order, fpi_t fpi)
+static bool pfnblock_migratetype_equal(unsigned long pfn,
+		unsigned long end_pfn, int mt)
 {
-	unsigned long end = pfn + (1 << order);
+	VM_WARN_ON_ONCE(!IS_ALIGNED(pfn | end_pfn, pageblock_nr_pages));
 
+	while (pfn != end_pfn) {
+		struct page *page = pfn_to_page(pfn);
+
+		if (unlikely(mt != get_pfnblock_migratetype(page, pfn)))
+			return false;
+		pfn += pageblock_nr_pages;
+	}
+	return true;
+}
+
+static void __free_one_page_maybe_split(struct zone *zone, struct page *page,
+		unsigned long pfn, int order, fpi_t fpi_flags)
+{
+	const unsigned long end_pfn = pfn + (1 << order);
+	int mt = get_pfnblock_migratetype(page, pfn);
+
+	VM_WARN_ON_ONCE(order > MAX_PAGE_ORDER);
 	VM_WARN_ON_ONCE(!IS_ALIGNED(pfn, 1 << order));
 	/* Caller removed page from freelist, buddy info cleared! */
 	VM_WARN_ON_ONCE(PageBuddy(page));
 
-	if (order > pageblock_order)
-		order = pageblock_order;
+	/*
+	 * With CONFIG_MEMORY_ISOLATION, we might be freeing MAX_ORDER_NR_PAGES
+	 * pages that cover pageblocks with different migratetypes; for example
+	 * only some migratetypes might be MIGRATE_ISOLATE. In that (unlikely)
+	 * case, fallback to freeing individual pageblocks so they get put
+	 * onto the right lists.
+	 */
+	if (!IS_ENABLED(CONFIG_MEMORY_ISOLATION) ||
+	    likely(order <= pageblock_order) ||
+	    pfnblock_migratetype_equal(pfn + pageblock_nr_pages, end_pfn, mt)) {
+		__free_one_page(page, pfn, zone, order, mt, fpi_flags);
+		return;
+	}
 
-	while (pfn != end) {
-		int mt = get_pfnblock_migratetype(page, pfn);
-
-		__free_one_page(page, pfn, zone, order, mt, fpi);
-		pfn += 1 << order;
+	while (pfn != end_pfn) {
+		mt = get_pfnblock_migratetype(page, pfn);
+		__free_one_page(page, pfn, zone, pageblock_order, mt, fpi_flags);
+		pfn += pageblock_nr_pages;
 		page = pfn_to_page(pfn);
 	}
 }
@@ -1254,7 +1280,24 @@ static void free_one_page(struct zone *zone, struct page *page,
 	unsigned long flags;
 
 	spin_lock_irqsave(&zone->lock, flags);
-	split_large_buddy(zone, page, pfn, order, fpi_flags);
+	if (likely(order <= MAX_PAGE_ORDER)) {
+		__free_one_page_maybe_split(zone, page, pfn, order, fpi_flags);
+	} else if (IS_ENABLED(CONFIG_CONTIG_ALLOC)) {
+		const unsigned long end_pfn = pfn + (1 << order);
+
+		/*
+		 * The only way we can end up with order > MAX_PAGE_ORDER is
+		 * through alloc_contig_range(__GFP_COMP).
+		 */
+		while (pfn != end_pfn) {
+			__free_one_page_maybe_split(zone, page, pfn,
+						    MAX_PAGE_ORDER, fpi_flags);
+			pfn += MAX_ORDER_NR_PAGES;
+			page = pfn_to_page(pfn);
+		}
+	} else {
+		WARN_ON_ONCE(1);
+	}
 	spin_unlock_irqrestore(&zone->lock, flags);
 
 	__count_vm_events(PGFREE, 1 << order);
@@ -1790,7 +1833,7 @@ bool move_freepages_block_isolate(struct zone *zone, struct page *page,
 		del_page_from_free_list(buddy, zone, order,
 					get_pfnblock_migratetype(buddy, pfn));
 		set_pageblock_migratetype(page, migratetype);
-		split_large_buddy(zone, buddy, pfn, order, FPI_NONE);
+		__free_one_page_maybe_split(zone, buddy, pfn, order, FPI_NONE);
 		return true;
 	}
 
@@ -1801,7 +1844,7 @@ bool move_freepages_block_isolate(struct zone *zone, struct page *page,
 		del_page_from_free_list(page, zone, order,
 					get_pfnblock_migratetype(page, pfn));
 		set_pageblock_migratetype(page, migratetype);
-		split_large_buddy(zone, page, pfn, order, FPI_NONE);
+		__free_one_page_maybe_split(zone, page, pfn, order, FPI_NONE);
 		return true;
 	}
 move:
