@@ -298,11 +298,10 @@ __first_valid_page(unsigned long pfn, unsigned long nr_pages)
  * pagelbocks.
  * [      MAX_PAGE_ORDER         ]
  * [  pageblock0  |  pageblock1  ]
- * When either pageblock is isolated, if it is a free page, the page is not
- * split into separate migratetype lists, which is supposed to; if it is an
- * in-use page and freed later, __free_one_page() does not split the free page
- * either. The function handles this by splitting the free page or migrating
- * the in-use page then splitting the free page.
+ * When either pageblock is isolated, if it is an in-use page and freed later,
+ * __free_one_page_maybe_split() will split the free page if required. If the
+ * page is already free, this function handles this by splitting the free page
+ * through move_freepages_block_isolate()->__free_one_page_maybe_split().
  */
 static int isolate_single_pageblock(unsigned long boundary_pfn, int flags,
 		bool isolate_before, bool skip_isolation, int migratetype)
