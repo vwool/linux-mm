@@ -916,8 +916,7 @@ static enum folio_references folio_check_references(struct folio *folio,
 		if (!referenced_ptes)
 			return FOLIOREF_RECLAIM;
 
-		lru_gen_set_refs(folio);
-		return FOLIOREF_ACTIVATE;
+		return lru_gen_set_refs(folio) ? FOLIOREF_ACTIVATE : FOLIOREF_KEEP;
 	}
 
 	referenced_folio = folio_test_clear_referenced(folio);
@@ -4173,11 +4172,7 @@ bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 			old_gen = folio_update_gen(folio, new_gen);
 			if (old_gen >= 0 && old_gen != new_gen)
 				update_batch_size(walk, folio, old_gen, new_gen);
-
-			continue;
-		}
-
-		if (lru_gen_set_refs(folio)) {
+		} else if (lru_gen_set_refs(folio)) {
 			old_gen = folio_lru_gen(folio);
 			if (old_gen >= 0 && old_gen != new_gen)
 				folio_activate(folio);
