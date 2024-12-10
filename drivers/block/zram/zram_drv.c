@@ -1668,7 +1668,7 @@ compress_again:
 
 	if (last_comp_len && (last_comp_len != comp_len)) {
 		zs_free(zram->mem_pool, handle);
-		handle = (unsigned long)ERR_PTR(-ENOMEM);
+		handle = -ENOMEM;
 	}
 	/*
 	 * handle allocation has 2 paths:
