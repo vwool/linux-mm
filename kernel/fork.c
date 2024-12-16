@@ -473,6 +473,10 @@ struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 
 void __vm_area_free(struct vm_area_struct *vma)
 {
+#ifdef CONFIG_PER_VMA_LOCK
+	/* The vma should be detached while being destroyed. */
+	VM_BUG_ON_VMA(!is_vma_detached(vma), vma);
+#endif
 	vma_numab_state_free(vma);
 	free_anon_vma_name(vma);
 	kmem_cache_free(vm_area_cachep, vma);
