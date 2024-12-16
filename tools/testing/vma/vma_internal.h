@@ -25,7 +25,7 @@
 #include <linux/maple_tree.h>
 #include <linux/mm.h>
 #include <linux/rbtree.h>
-#include <linux/rwsem.h>
+#include <linux/refcount.h>
 
 extern unsigned long stack_guard_gap;
 #ifdef CONFIG_MMU
@@ -132,10 +132,6 @@ typedef __bitwise unsigned int vm_fault_t;
  */
 #define pr_warn_once pr_err
 
-typedef struct refcount_struct {
-	atomic_t refs;
-} refcount_t;
-
 struct kref {
 	refcount_t refcount;
 };
@@ -228,14 +224,13 @@ struct mm_struct {
 	unsigned long def_flags;
 };
 
-struct vma_lock {
-	struct rw_semaphore lock;
-};
-
-
 struct file {
 	struct address_space	*f_mapping;
 };
+
+#define VMA_STATE_DETACHED	0x0
+#define VMA_STATE_ATTACHED	0x1
+#define VMA_STATE_LOCKED	0x40000000
 
 struct vm_area_struct {
 	/* The first cache line has the info for VMA tree walking. */
@@ -264,16 +259,13 @@ struct vm_area_struct {
 	};
 
 #ifdef CONFIG_PER_VMA_LOCK
-	/* Flag to indicate areas detached from the mm->mm_mt tree */
-	bool detached;
-
 	/*
 	 * Can only be written (using WRITE_ONCE()) while holding both:
 	 *  - mmap_lock (in write mode)
-	 *  - vm_lock.lock (in write mode)
+	 *  - vm_refcnt VMA_STATE_LOCKED is set
 	 * Can be read reliably while holding one of:
 	 *  - mmap_lock (in read or write mode)
-	 *  - vm_lock.lock (in read or write mode)
+	 *  - vm_refcnt VMA_STATE_LOCKED is set or vm_refcnt > VMA_STATE_ATTACHED
 	 * Can be read unreliably (using READ_ONCE()) for pessimistic bailout
 	 * while holding nothing (except RCU to keep the VMA struct allocated).
 	 *
@@ -282,7 +274,6 @@ struct vm_area_struct {
 	 * slowpath.
 	 */
 	unsigned int vm_lock_seq;
-	struct vma_lock vm_lock;
 #endif
 
 	/*
@@ -335,6 +326,10 @@ struct vm_area_struct {
 	struct vma_numab_state *numab_state;	/* NUMA Balancing state */
 #endif
 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+#ifdef CONFIG_PER_VMA_LOCK
+	/* Unstable RCU readers are allowed to read this. */
+	refcount_t vm_refcnt;
+#endif
 } __randomize_layout;
 
 struct vm_fault {};
@@ -461,21 +456,37 @@ static inline struct vm_area_struct *vma_next(struct vma_iterator *vmi)
 
 static inline void vma_lock_init(struct vm_area_struct *vma)
 {
-	init_rwsem(&vma->vm_lock.lock);
+	refcount_set(&vma->vm_refcnt, VMA_STATE_DETACHED);
 	vma->vm_lock_seq = UINT_MAX;
 }
 
-static inline void vma_mark_attached(struct vm_area_struct *vma)
+static inline bool is_vma_detached(struct vm_area_struct *vma)
 {
-	vma->detached = false;
+	return refcount_read(&vma->vm_refcnt) == VMA_STATE_DETACHED;
 }
 
 static inline void vma_assert_write_locked(struct vm_area_struct *);
+static inline void vma_mark_attached(struct vm_area_struct *vma)
+{
+	vma_assert_write_locked(vma);
+
+	if (is_vma_detached(vma))
+		refcount_set(&vma->vm_refcnt, VMA_STATE_ATTACHED);
+}
+
 static inline void vma_mark_detached(struct vm_area_struct *vma)
 {
-	/* When detaching vma should be write-locked */
 	vma_assert_write_locked(vma);
-	vma->detached = true;
+
+	if (is_vma_detached(vma))
+		return;
+
+	if (!refcount_dec_and_test(&vma->vm_refcnt)) {
+		/*
+		 * Reader must have temporarily raised vm_refcnt but it will
+		 * drop it without using the vma since vma is write-locked.
+		 */
+	}
 }
 
 extern const struct vm_operations_struct vma_dummy_vm_ops;
@@ -488,8 +499,6 @@ static inline void vma_init(struct vm_area_struct *vma, struct mm_struct *mm)
 	vma->vm_mm = mm;
 	vma->vm_ops = &vma_dummy_vm_ops;
 	INIT_LIST_HEAD(&vma->anon_vma_chain);
-	/* vma is not locked, can't use vma_mark_detached() */
-	vma->detached = true;
 	vma_lock_init(vma);
 }
 
@@ -515,8 +524,6 @@ static inline struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 	memcpy(new, orig, sizeof(*new));
 	vma_lock_init(new);
 	INIT_LIST_HEAD(&new->anon_vma_chain);
-	/* vma is not locked, can't use vma_mark_detached() */
-	new->detached = true;
 
 	return new;
 }
