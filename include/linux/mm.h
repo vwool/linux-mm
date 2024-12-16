@@ -863,6 +863,15 @@ static inline bool is_vma_detached(struct vm_area_struct *vma)
 	return refcount_read(&vma->vm_refcnt) == VMA_STATE_DETACHED;
 }
 
+/*
+ * WARNING: to avoid racing with vma_mark_attached(), should be called either
+ * under mmap_write_lock or when the object has been isolated under
+ * mmap_write_lock, ensuring no competing writers.
+ * Should be called after marking vma as detached to wait for possible
+ * readers which temporarily raised vm_refcnt to drop it back and exit.
+ */
+void vma_ensure_detached(struct vm_area_struct *vma);
+
 static inline void vma_mark_attached(struct vm_area_struct *vma)
 {
 	vma_assert_write_locked(vma);

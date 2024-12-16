@@ -465,6 +465,14 @@ static inline bool is_vma_detached(struct vm_area_struct *vma)
 	return refcount_read(&vma->vm_refcnt) == VMA_STATE_DETACHED;
 }
 
+static inline void vma_ensure_detached(struct vm_area_struct *vma)
+{
+	if (is_vma_detached(vma))
+		return;
+
+	refcount_set(&vma->vm_refcnt, VMA_STATE_DETACHED);
+}
+
 static inline void vma_assert_write_locked(struct vm_area_struct *);
 static inline void vma_mark_attached(struct vm_area_struct *vma)
 {

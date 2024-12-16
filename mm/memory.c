@@ -6329,18 +6329,10 @@ fail:
 #endif
 
 #ifdef CONFIG_PER_VMA_LOCK
-void __vma_start_write(struct vm_area_struct *vma, unsigned int mm_lock_seq)
+static inline bool __vma_enter_locked(struct vm_area_struct *vma)
 {
-	bool detached;
-
-	/*
-	 * If vma is detached then only vma_mark_attached() can raise the
-	 * vm_refcnt. mmap_write_lock prevents racing with vma_mark_attached().
-	 */
-	if (!refcount_inc_not_zero(&vma->vm_refcnt)) {
-		WRITE_ONCE(vma->vm_lock_seq, mm_lock_seq);
-		return;
-	}
+	if (!refcount_inc_not_zero(&vma->vm_refcnt))
+		return false;
 
 	rwsem_acquire(&vma->vmlock_dep_map, 0, 0, _RET_IP_);
 	/* vma is attached, set the writer present bit */
@@ -6350,6 +6342,22 @@ void __vma_start_write(struct vm_area_struct *vma, unsigned int mm_lock_seq)
 		   refcount_read(&vma->vm_refcnt) == VMA_STATE_ATTACHED + (VMA_STATE_LOCKED + 1),
 		   TASK_UNINTERRUPTIBLE);
 	lock_acquired(&vma->vmlock_dep_map, _RET_IP_);
+
+	return true;
+}
+
+static inline void __vma_exit_locked(struct vm_area_struct *vma, bool *is_detached)
+{
+	*is_detached = refcount_sub_and_test(VMA_STATE_LOCKED + 1,
+					     &vma->vm_refcnt);
+	rwsem_release(&vma->vmlock_dep_map, _RET_IP_);
+}
+
+void __vma_start_write(struct vm_area_struct *vma, unsigned int mm_lock_seq)
+{
+	bool locked;
+
+	locked = __vma_enter_locked(vma);
 	/*
 	 * We should use WRITE_ONCE() here because we can have concurrent reads
 	 * from the early lockless pessimistic check in vma_start_read().
@@ -6357,12 +6365,29 @@ void __vma_start_write(struct vm_area_struct *vma, unsigned int mm_lock_seq)
 	 * we should use WRITE_ONCE() for cleanliness and to keep KCSAN happy.
 	 */
 	WRITE_ONCE(vma->vm_lock_seq, mm_lock_seq);
-	detached = refcount_sub_and_test(VMA_STATE_LOCKED + 1,
-					 &vma->vm_refcnt);
-	rwsem_release(&vma->vmlock_dep_map, _RET_IP_);
-	VM_BUG_ON_VMA(detached, vma); /* vma should remain attached */
+	if (locked) {
+		bool detached;
+
+		__vma_exit_locked(vma, &detached);
+		/* vma was originally attached and should remain so */
+		VM_BUG_ON_VMA(detached, vma);
+	}
 }
 EXPORT_SYMBOL_GPL(__vma_start_write);
+
+void vma_ensure_detached(struct vm_area_struct *vma)
+{
+	if (is_vma_detached(vma))
+		return;
+
+	if (__vma_enter_locked(vma)) {
+		bool detached;
+
+		/* Wait for temporary readers to drop the vm_refcnt */
+		__vma_exit_locked(vma, &detached);
+		VM_BUG_ON_VMA(!detached, vma);
+	}
+}
 
 /*
  * Lookup and lock a VMA under RCU protection. Returned VMA is guaranteed to be
