@@ -1484,7 +1484,7 @@ static int uffd_move_lock(struct mm_struct *mm,
 	mmap_read_lock(mm);
 	err = find_vmas_mm_locked(mm, dst_start, src_start, dst_vmap, src_vmap);
 	if (!err) {
-		if (!vma_start_read_locked(*dst_vmap)) {
+		if (vma_start_read_locked(*dst_vmap)) {
 			if (*dst_vmap != *src_vmap) {
 				if (!vma_start_read_locked_nested(*src_vmap,
 							SINGLE_DEPTH_NESTING)) {
