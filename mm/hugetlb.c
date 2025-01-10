@@ -7422,7 +7422,7 @@ __weak unsigned long hugetlb_mask_last_page(struct hstate *h)
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 /**
- * folio_isolate_hugetlb: try to isolate an allocated hugetlb folio
+ * folio_isolate_hugetlb - try to isolate an allocated hugetlb folio
  * @folio: the folio to isolate
  * @list: the list to add the folio to on success
  *
