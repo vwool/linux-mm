@@ -400,3 +400,24 @@ unsigned long get_free_hugepages(void)
 	fclose(f);
 	return fhp;
 }
+
+bool check_vmflag_io(void *addr)
+{
+	char *saveptr, *flag, *strtok_arg;
+	char buffer[MAX_LINE_LENGTH];
+
+	strtok_arg = __get_smap_entry(addr, "VmFlags:", buffer, sizeof(buffer));
+	if (!strtok_arg)
+		ksft_exit_fail_msg("%s: No VmFlags for %p\n", __func__, addr);
+
+	while (true) {
+		flag = strtok_r(strtok_arg, " ", &saveptr);
+		if (!flag)
+			break;
+		if (strcmp(flag, "io") == 0)
+			return true;
+		strtok_arg = NULL;
+	}
+
+	return false;
+}
