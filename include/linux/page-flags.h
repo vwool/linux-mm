@@ -931,21 +931,9 @@ static inline int PageTransCompound(const struct page *page)
 {
 	return PageCompound(page);
 }
-
-/*
- * PageTransTail returns true for both transparent huge pages
- * and hugetlbfs pages, so it should only be called when it's known
- * that hugetlbfs pages aren't involved.
- */
-static inline int PageTransTail(const struct page *page)
-{
-	return PageTail(page);
-}
 #else
 TESTPAGEFLAG_FALSE(TransHuge, transhuge)
 TESTPAGEFLAG_FALSE(TransCompound, transcompound)
-TESTPAGEFLAG_FALSE(TransCompoundMap, transcompoundmap)
-TESTPAGEFLAG_FALSE(TransTail, transtail)
 #endif
 
 #if defined(CONFIG_MEMORY_FAILURE) && defined(CONFIG_TRANSPARENT_HUGEPAGE)
@@ -955,11 +943,9 @@ TESTPAGEFLAG_FALSE(TransTail, transtail)
  *
  * This flag is set by hwpoison handler.  Cleared by THP split or free page.
  */
-PAGEFLAG(HasHWPoisoned, has_hwpoisoned, PF_SECOND)
-	TESTSCFLAG(HasHWPoisoned, has_hwpoisoned, PF_SECOND)
+FOLIO_FLAG(has_hwpoisoned, FOLIO_SECOND_PAGE)
 #else
-PAGEFLAG_FALSE(HasHWPoisoned, has_hwpoisoned)
-	TESTSCFLAG_FALSE(HasHWPoisoned, has_hwpoisoned)
+FOLIO_FLAG_FALSE(has_hwpoisoned)
 #endif
 
 /*
