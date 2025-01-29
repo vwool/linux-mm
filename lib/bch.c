@@ -313,6 +313,9 @@ static inline int deg(unsigned int poly)
 
 static inline int parity(unsigned int x)
 {
+#if __has_builtin(__builtin_parity)
+	return __builtin_parity(x);
+#else
 	/*
 	 * public domain code snippet, lifted from
 	 * http://www-graphics.stanford.edu/~seander/bithacks.html
@@ -321,6 +324,7 @@ static inline int parity(unsigned int x)
 	x ^= x >> 2;
 	x = (x & 0x11111111U) * 0x11111111U;
 	return (x >> 28) & 1;
+#endif
 }
 
 /* Galois field basic operations: multiply, divide, inverse, etc. */
