@@ -5,9 +5,15 @@
 mod configfs;
 
 use configfs::IRQMode;
+use kernel::alloc::scoped::{
+    NoIo,
+    ScopeKind, //
+};
 use kernel::{
+    bindings,
     block::{
         self,
+        bio::Segment,
         mq::{
             self,
             gen_disk::{
@@ -19,15 +25,15 @@ use kernel::{
         }, //
     },
     error::Result,
-    new_mutex,
+    new_mutex, new_xarray,
+    page::{
+        Exclusive,
+        Page, //
+    },
     pr_info,
     prelude::*,
     str::CString,
-    sync::{
-        aref::ARef,
-        Arc,
-        Mutex, //
-    },
+    sync::{aref::ARef, Arc, Mutex},
     time::{
         hrtimer::{
             HrTimerCallback,
@@ -41,7 +47,8 @@ use kernel::{
         OwnableIntoShared,
         OwnableTryFromShared,
         Owned, //
-    }, //
+    },
+    xarray::XArray,
 };
 
 module! {
@@ -75,6 +82,10 @@ module! {
             default: 10_000,
             description:  "Time in ns to complete a request in hardware. Default: 10,000ns",
         },
+        memory_backed: bool {
+            default: false,
+            description: "Create a memory-backed block device.",
+        },
     },
 }
 
@@ -104,6 +115,7 @@ impl kernel::InPlaceModule for NullBlkModule {
                     module_parameters::gb.value() * 1024,
                     module_parameters::irqmode.value().try_into()?,
                     Delta::from_nanos(completion_time),
+                    module_parameters::memory_backed.value(),
                 )?;
                 disks.push(disk, GFP_KERNEL)?;
             }
@@ -128,17 +140,23 @@ impl NullBlkDevice {
         capacity_mib: u64,
         irq_mode: IRQMode,
         completion_time: Delta,
+        memory_backed: bool,
     ) -> Result<GenDisk<Self>> {
-        let tagset = Arc::pin_init(
-            TagSet::new(1, 256, 1, mq::tag_set::Flags::default()),
-            GFP_KERNEL,
-        )?;
+        let flags = if memory_backed {
+            mq::tag_set::Flag::Blocking.into()
+        } else {
+            mq::tag_set::Flags::default()
+        };
 
-        let queue_data = Box::new(
-            QueueData {
+        let tagset = Arc::pin_init(TagSet::new(1, 256, 1, flags), GFP_KERNEL)?;
+
+        let queue_data = Box::pin_init(
+            pin_init!(QueueData {
+                tree <- new_xarray!(kernel::xarray::AllocKind::Alloc),
                 irq_mode,
                 completion_time,
-            },
+                memory_backed,
+            }),
             GFP_KERNEL,
         )?;
 
@@ -149,11 +167,73 @@ impl NullBlkDevice {
             .rotational(rotational)
             .build(fmt!("{}", name.to_str()?), tagset, queue_data)
     }
+
+    #[inline(always)]
+    fn write(tree: &XArray<TreeNode>, mut sector: usize, mut segment: Segment<'_>) -> Result {
+        while !segment.at_end() {
+            let page = Page::alloc_exclusive(GFP_KERNEL)?;
+            let mut tree = tree.lock();
+
+            let page_idx = sector >> block::PAGE_SECTORS_SHIFT;
+
+            let page = if let Some(page) = tree.get_mut(page_idx) {
+                page
+            } else {
+                tree.store(page_idx, page, GFP_KERNEL)?;
+                tree.get_mut(page_idx).unwrap()
+            };
+
+            let page_offset = (sector & block::PAGE_SECTOR_MASK as usize) << block::SECTOR_SHIFT;
+            let dst = &mut page.as_mut_slice()[page_offset..];
+            sector += segment.read(dst) >> block::SECTOR_SHIFT;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn read(tree: &XArray<TreeNode>, mut sector: usize, mut segment: Segment<'_>) -> Result {
+        let tree = tree.lock();
+
+        while !segment.at_end() {
+            let idx = sector >> block::PAGE_SECTORS_SHIFT;
+
+            if let Some(page) = tree.get(idx) {
+                let page_offset =
+                    (sector & block::PAGE_SECTOR_MASK as usize) << block::SECTOR_SHIFT;
+                sector += segment.write(&page.as_slice()[page_offset..]) >> block::SECTOR_SHIFT;
+            } else {
+                sector += segment.zero_page() >> block::SECTOR_SHIFT;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn transfer(
+        command: bindings::req_op,
+        tree: &XArray<TreeNode>,
+        sector: usize,
+        segment: Segment<'_>,
+    ) -> Result {
+        match command {
+            bindings::req_op_REQ_OP_WRITE => Self::write(tree, sector, segment)?,
+            bindings::req_op_REQ_OP_READ => Self::read(tree, sector, segment)?,
+            _ => (),
+        }
+        Ok(())
+    }
 }
 
+type TreeNode = Owned<Page<Exclusive>>;
+
+#[pin_data]
 struct QueueData {
+    #[pin]
+    tree: XArray<TreeNode>,
     irq_mode: IRQMode,
     completion_time: Delta,
+    memory_backed: bool,
 }
 
 #[pin_data]
@@ -183,7 +263,7 @@ kernel::impl_has_hr_timer! {
 
 #[vtable]
 impl Operations for NullBlkDevice {
-    type QueueData = KBox<QueueData>;
+    type QueueData = Pin<KBox<QueueData>>;
     type RequestData = Pdu;
 
     fn new_request_data() -> impl PinInit<Self::RequestData> {
@@ -193,7 +273,29 @@ impl Operations for NullBlkDevice {
     }
 
     #[inline(always)]
-    fn queue_rq(queue_data: &QueueData, rq: Owned<mq::Request<Self>>, _is_last: bool) -> Result {
+    fn queue_rq(
+        queue_data: Pin<&QueueData>,
+        mut rq: Owned<mq::Request<Self>>,
+        _is_last: bool,
+    ) -> Result {
+        if queue_data.memory_backed {
+            NoIo::with(|| -> Result {
+                let tree = &queue_data.tree;
+                let command = rq.command();
+                let mut sector = rq.sector();
+
+                for bio in rq.bio_iter_mut() {
+                    let segment_iter = bio.segment_iter();
+                    for segment in segment_iter {
+                        let length = segment.len();
+                        Self::transfer(command, tree, sector, segment)?;
+                        sector += length as usize >> block::SECTOR_SHIFT;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+
         match queue_data.irq_mode {
             IRQMode::None => rq.end_ok(),
             IRQMode::Soft => mq::Request::complete(rq.into()),
@@ -206,7 +308,7 @@ impl Operations for NullBlkDevice {
         Ok(())
     }
 
-    fn commit_rqs(_queue_data: &QueueData) {}
+    fn commit_rqs(_queue_data: Pin<&QueueData>) {}
 
     fn complete(rq: ARef<mq::Request<Self>>) {
         OwnableTryFromShared::try_from_shared(rq)
