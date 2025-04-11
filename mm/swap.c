@@ -175,6 +175,8 @@ static void folio_batch_move_lru(struct folio_batch *fbatch, move_fn_t move_fn)
 	folios_put(fbatch);
 }
 
+static void lru_activate(struct lruvec *lruvec, struct folio *folio);
+
 static void __folio_batch_add_and_move(struct folio_batch __percpu *fbatch,
 		struct folio *folio, move_fn_t move_fn,
 		bool on_lru, bool disable_irq)
@@ -183,6 +185,14 @@ static void __folio_batch_add_and_move(struct folio_batch __percpu *fbatch,
 
 	if (on_lru && !folio_test_clear_lru(folio))
 		return;
+
+	if (move_fn == lru_activate) {
+		if (folio_test_unevictable(folio)) {
+			folio_set_lru(folio);
+			return;
+		}
+		folio_set_active(folio);
+	}
 
 	folio_get(folio);
 
@@ -299,12 +309,15 @@ static void lru_activate(struct lruvec *lruvec, struct folio *folio)
 {
 	long nr_pages = folio_nr_pages(folio);
 
-	if (folio_test_active(folio) || folio_test_unevictable(folio))
-		return;
-
+	/*
+	 * We check unevictable flag isn't set and set active flag
+	 * after we clear lru flag. Unevictable and active flag
+	 * couldn't be modified before we set lru flag again.
+	 */
+	VM_WARN_ON_ONCE(!folio_test_active(folio));
+	VM_WARN_ON_ONCE(folio_test_unevictable(folio));
 
 	lruvec_del_folio(lruvec, folio);
-	folio_set_active(folio);
 	lruvec_add_folio(lruvec, folio);
 	trace_mm_lru_activate(folio);
 
@@ -341,6 +354,11 @@ void folio_activate(struct folio *folio)
 	if (!folio_test_clear_lru(folio))
 		return;
 
+	if (folio_test_unevictable(folio) || folio_test_active(folio)) {
+		folio_set_lru(folio);
+		return;
+	}
+	folio_set_active(folio);
 	lruvec = folio_lruvec_lock_irq(folio);
 	lru_activate(lruvec, folio);
 	unlock_page_lruvec_irq(lruvec);
