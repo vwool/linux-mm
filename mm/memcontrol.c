@@ -1964,10 +1964,10 @@ static int memcg_hotplug_cpu_dead(unsigned int cpu)
 
 	stock = &per_cpu(memcg_stock, cpu);
 
-	local_irq_save(flag);
+	local_irq_save(flags);
 	/* stock of a remote dead cpu, no need for stock_lock. */
 	__drain_obj_stock(stock);
-	local_irq_restore(flag);
+	local_irq_restore(flags);
 
 	drain_stock(stock);
 
