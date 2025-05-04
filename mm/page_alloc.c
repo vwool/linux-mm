@@ -7422,3 +7422,4 @@ struct page *try_alloc_pages_noprof(int nid, unsigned int order)
 	kmsan_alloc_page(page, order, alloc_gfp);
 	return page;
 }
+EXPORT_SYMBOL_GPL(try_alloc_pages_noprof);
