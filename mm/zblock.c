@@ -31,24 +31,17 @@
 static struct rb_root block_desc_tree = RB_ROOT;
 static struct dentry *zblock_debugfs_root;
 
-/* allocate order 0 blocks using vmalloc? <-- disabled by default */
-static bool vmalloc_small_blocks;
-module_param_named(vmalloc_small_blocks, vmalloc_small_blocks, bool, 0644);
-
 /* Encode handle of a particular slot in the pool using metadata */
-static inline unsigned long metadata_to_handle(struct zblock_block *block,
-				unsigned int block_type, unsigned int slot)
+static inline unsigned long metadata_to_handle(struct zblock_block *block, unsigned int slot)
 {
-	return (unsigned long)(block) | (block_type << SLOT_BITS) | slot;
+	return (unsigned long)(block) | slot;
 }
 
 /* Return block, block type and slot in the pool corresponding to handle */
-static inline struct zblock_block *handle_to_metadata(unsigned long handle,
-				unsigned int *block_type, unsigned int *slot)
+static inline struct zblock_block *handle_to_metadata(unsigned long handle, unsigned int *slot)
 {
-	*block_type = (handle & (PAGE_SIZE - 1)) >> SLOT_BITS;
 	*slot = handle & SLOT_MASK;
-	return (struct zblock_block *)(handle & PAGE_MASK);
+	return (struct zblock_block *)(handle & ~SLOT_MASK);
 }
 
 /*
@@ -83,26 +76,13 @@ static inline struct zblock_block *find_and_claim_block(struct block_list *b,
 		}
 		spin_unlock(&b->lock);
 
-		*handle = metadata_to_handle(z, block_type, slot);
+		*handle = metadata_to_handle(z, slot);
 		return z;
 	}
 	spin_unlock(&b->lock);
 	return NULL;
 }
 
-static inline int zblock_get_order(unsigned int num_pages)
-{
-	switch (num_pages) {
-	case 1:
-	case 2:
-		return num_pages - 1;
-	case 4:
-		return 2;
-	default:
-		break;
-	}
-	return -1;
-}
 /*
  * allocate new block and add it to corresponding block list
  */
@@ -112,37 +92,39 @@ static struct zblock_block *alloc_block(struct zblock_pool *pool,
 					unsigned int nid)
 {
 	struct block_list *block_list = &pool->block_lists[block_type];
-	unsigned int num_pages = block_desc[block_type].num_pages;
+	unsigned int num_pages = block_desc[block_type].num_pages, n_pages = 0, n;
 	struct zblock_block *block;
-	struct page *page = NULL;
 
-	if (!vmalloc_small_blocks && zblock_get_order(num_pages) >= 0) {
-		page = try_alloc_pages(nid, zblock_get_order(num_pages));
-		if (page) {
-			page->private = PAGE_SMALL_BLOCK;
-			block = page_address(page);
-		}
-	}
-	if (!page) {
-		block = __vmalloc_node(PAGE_SIZE * num_pages, PAGE_SIZE, gfp, nid, NULL);
-		if (!block)
-			return NULL;
+	block = kmem_cache_zalloc(pool->block_header_cache, gfp);
+	if (!block)
+		goto out_cache;
 
-		page = vmalloc_to_page(block);
-		page->private = 0;
-	}
+	do {
+		n = alloc_pages_bulk_node(gfp, nid, num_pages - n_pages,
+					block->page_array + n_pages);
+		if (!n)
+			goto out_alloc;
+		n_pages += n;
+	} while (n_pages < num_pages);
 
-	/* init block data  */
+	/* init block data */
+	block->block_type = block_type;
 	block->free_slots = block_desc[block_type].slots_per_block - 1;
-	memset(&block->slot_info, 0, sizeof(block->slot_info));
 	set_bit(0, block->slot_info);
-	*handle = metadata_to_handle(block, block_type, 0);
+	*handle = metadata_to_handle(block, 0);
 
 	spin_lock(&block_list->lock);
 	list_add(&block->link, &block_list->active_list);
 	block_list->block_count++;
 	spin_unlock(&block_list->lock);
 	return block;
+
+out_alloc:
+	for (n = 0; n < n_pages; n++)
+		__free_page(block->page_array[n]);
+	kmem_cache_free(pool->block_header_cache, block);
+out_cache:
+	return NULL;
 }
 
 static int zblock_blocks_show(struct seq_file *s, void *v)
@@ -189,9 +171,19 @@ static struct zblock_pool *zblock_create_pool(gfp_t gfp)
 		block_list->block_count = 0;
 	}
 
+	pool->block_header_cache = kmem_cache_create("zblock",
+						     sizeof(struct zblock_block),
+						     (1 << SLOT_BITS), 0, NULL);
+	if (!pool->block_header_cache)
+		goto out;
+
 	debugfs_create_file("blocks", S_IFREG | 0444, zblock_debugfs_root,
 			    pool, &zblock_blocks_fops);
 	return pool;
+
+out:
+	kfree(pool);
+	return NULL;
 }
 
 /**
@@ -201,6 +193,7 @@ static struct zblock_pool *zblock_create_pool(gfp_t gfp)
  */
 static void zblock_destroy_pool(struct zblock_pool *pool)
 {
+	kmem_cache_destroy(pool->block_header_cache);
 	kfree(pool);
 }
 
@@ -274,7 +267,8 @@ static void zblock_free(struct zblock_pool *pool, unsigned long handle)
 	struct zblock_block *block;
 	struct block_list *block_list;
 
-	block = handle_to_metadata(handle, &block_type, &slot);
+	block = handle_to_metadata(handle, &slot);
+	block_type = block->block_type;
 	block_list = &pool->block_lists[block_type];
 
 	/* clear bit early, this will shorten the search */
@@ -283,16 +277,14 @@ static void zblock_free(struct zblock_pool *pool, unsigned long handle)
 	spin_lock(&block_list->lock);
 	/* if all slots in block are empty delete the whole block */
 	if (++block->free_slots == block_desc[block_type].slots_per_block) {
-		struct page *page = vmalloc_to_page(block);
-		int num_pages = block_desc[block_type].num_pages;
+		int num_pages = block_desc[block_type].num_pages, i;
 
 		block_list->block_count--;
 		__list_del_clearprev(&block->link);
 		spin_unlock(&block_list->lock);
-		if (page->private & PAGE_SMALL_BLOCK)
-			__free_pages(page, zblock_get_order(num_pages));
-		else
-			vfree(block);
+		for (i = 0; i < num_pages; i++)
+			__free_page(block->page_array[i]);
+		kmem_cache_free(pool->block_header_cache, block);
 		return;
 	} else if (block->free_slots == 1)
 		list_add(&block->link, &block_list->active_list);
@@ -309,14 +301,34 @@ static void zblock_free(struct zblock_pool *pool, unsigned long handle)
  */
 static void *zblock_map(struct zblock_pool *pool, unsigned long handle)
 {
-	unsigned int block_type, slot;
+	unsigned int slot;
 	struct zblock_block *block;
 	unsigned long offs;
 	void *p;
 
-	block = handle_to_metadata(handle, &block_type, &slot);
-	offs = ZBLOCK_HEADER_SIZE + slot * block_desc[block_type].slot_size;
-	p = (void *)block + offs;
+	block = handle_to_metadata(handle, &slot);
+	if (atomic_inc_return(&block->mapped_cnt) == 1) {
+		int num_pages = block_desc[block->block_type].num_pages;
+
+		p = vmap(block->page_array, num_pages, VM_MAP, PAGE_KERNEL);
+		if (!p) {
+			atomic_dec(&block->mapped_cnt);
+			goto out;
+		}
+		block->mapped_ptr = p;
+		smp_wmb();
+	} else {
+		while (!READ_ONCE(block->mapped_ptr)) {
+			if (!atomic_read(&block->mapped_cnt))
+				goto out;
+			smp_rmb();
+		}
+		p = block->mapped_ptr;
+	}
+
+	offs = slot * block_desc[block->block_type].slot_size;
+	p += offs;
+out:
 	return p;
 }
 
@@ -327,6 +339,14 @@ static void *zblock_map(struct zblock_pool *pool, unsigned long handle)
  */
 static void zblock_unmap(struct zblock_pool *pool, unsigned long handle)
 {
+	unsigned int slot;
+	struct zblock_block *block;
+
+	block = handle_to_metadata(handle, &slot);
+	if (atomic_dec_return(&block->mapped_cnt) == 0) {
+		vunmap(block->mapped_ptr);
+		block->mapped_ptr = NULL;
+	}
 }
 
 /**
@@ -339,15 +359,12 @@ static void zblock_unmap(struct zblock_pool *pool, unsigned long handle)
 static void zblock_write(struct zblock_pool *pool, unsigned long handle,
 			 void *handle_mem, size_t mem_len)
 {
-	unsigned int block_type, slot;
-	struct zblock_block *block;
-	unsigned long offs;
-	void *p;
+	void *p = zblock_map(pool, handle);
 
-	block = handle_to_metadata(handle, &block_type, &slot);
-	offs = ZBLOCK_HEADER_SIZE + slot * block_desc[block_type].slot_size;
-	p = (void *)block + offs;
-	memcpy(p, handle_mem, mem_len);
+	if (p) {
+		memcpy(p, handle_mem, mem_len);
+		zblock_unmap(pool, handle);
+	}
 }
 
 /**

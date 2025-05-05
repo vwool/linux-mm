@@ -29,8 +29,9 @@
 #define SLOT_MASK ((0x1UL << SLOT_BITS) - 1)
 
 #define ZBLOCK_HEADER_SIZE	round_up(sizeof(struct zblock_block), sizeof(long))
-#define BLOCK_DATA_SIZE(num) ((PAGE_SIZE * (num)) - ZBLOCK_HEADER_SIZE)
+#define BLOCK_DATA_SIZE(num) ((PAGE_SIZE * (num)))
 #define SLOT_SIZE(nslots, num) (round_down((BLOCK_DATA_SIZE(num) / nslots), sizeof(long)))
+#define ZBLOCK_MAX_PAGES_PER_BLOCK	8
 
 /**
  * struct zblock_block - block metadata
@@ -43,7 +44,11 @@
 struct zblock_block {
 	DECLARE_BITMAP(slot_info, 1 << SLOT_BITS);
 	struct list_head link;
-	u32 free_slots;
+	struct page *page_array[ZBLOCK_MAX_PAGES_PER_BLOCK];
+	atomic_t mapped_cnt;
+	void *mapped_ptr;
+	unsigned short block_type;
+	unsigned short free_slots;
 };
 
 /**
@@ -193,6 +198,7 @@ struct block_list {
  */
 struct zblock_pool {
 	struct block_list block_lists[ARRAY_SIZE(block_desc)];
+	struct kmem_cache *block_header_cache;
 	struct zpool *zpool;
 };
 
