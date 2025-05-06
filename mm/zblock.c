@@ -18,7 +18,6 @@
 
 #include <linux/atomic.h>
 #include <linux/debugfs.h>
-#include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/preempt.h>
@@ -53,13 +52,20 @@ static inline struct zblock_block *find_and_claim_block(struct block_list *b,
 {
 	struct list_head *l = &b->active_list;
 	unsigned int slot;
+	struct zblock_block *z;
 
-	spin_lock(&b->lock);
-	if (likely(!list_empty(l))) {
-		struct zblock_block *z = list_first_entry(l, typeof(*z), link);
-
+	rcu_read_lock();
+retry_claim:
+	z = list_first_or_null_rcu(l, typeof(*z), link);
+	if (z) {
+		spin_lock(&b->lock);
+		if (unlikely(!z->free_slots)) {
+			spin_unlock(&b->lock);
+			goto retry_claim;
+		}
 		if (--z->free_slots == 0)
-			__list_del_clearprev(&z->link);
+			list_bidir_del_rcu(&z->link);
+		spin_unlock(&b->lock);
 		/*
 		 * There is a slot in the block and we just made sure it will
 		 * remain.
@@ -74,13 +80,11 @@ static inline struct zblock_block *find_and_claim_block(struct block_list *b,
 			if (!test_and_set_bit(slot, z->slot_info))
 				break;
 		}
-		spin_unlock(&b->lock);
 
 		*handle = metadata_to_handle(z, slot);
-		return z;
 	}
-	spin_unlock(&b->lock);
-	return NULL;
+	rcu_read_unlock();
+	return z;
 }
 
 /*
@@ -103,13 +107,15 @@ static struct zblock_block *alloc_block(struct zblock_pool *pool,
 		goto out_alloc;
 
 	/* init block data */
+	block->pool = pool;
+	init_rcu_head(&block->rcu);
 	block->block_type = block_type;
 	block->free_slots = block_desc[block_type].slots_per_block - 1;
 	set_bit(0, block->slot_info);
 	*handle = metadata_to_handle(block, 0);
 
 	spin_lock(&block_list->lock);
-	list_add(&block->link, &block_list->active_list);
+	list_add_rcu(&block->link, &block_list->active_list);
 	block_list->block_count++;
 	spin_unlock(&block_list->lock);
 	return block;
@@ -118,6 +124,13 @@ out_alloc:
 	kmem_cache_free(pool->block_header_cache, block);
 out_cache:
 	return NULL;
+}
+
+static void zblock_free_header(struct rcu_head *rcu)
+{
+	struct zblock_block *z = container_of(rcu, typeof(*z), rcu);
+
+	kmem_cache_free(z->pool->block_header_cache, z);
 }
 
 static int zblock_blocks_show(struct seq_file *s, void *v)
@@ -270,10 +283,10 @@ static void zblock_free(struct zblock_pool *pool, unsigned long handle)
 	/* if all slots in block are empty delete the whole block */
 	if (++block->free_slots == block_desc[block_type].slots_per_block) {
 		block_list->block_count--;
-		__list_del_clearprev(&block->link);
+		list_bidir_del_rcu(&block->link);
 		spin_unlock(&block_list->lock);
 		vfree(block->page_block);
-		kmem_cache_free(pool->block_header_cache, block);
+		call_rcu(&block->rcu, zblock_free_header);
 		return;
 	} else if (block->free_slots == 1)
 		list_add(&block->link, &block_list->active_list);
