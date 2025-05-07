@@ -31,6 +31,10 @@
 static struct rb_root block_desc_tree = RB_ROOT;
 static struct dentry *zblock_debugfs_root;
 
+/* allocate order-0 with vmalloc? <-- enabled by default for all but x86 */
+static bool vmalloc_small_blocks = !IS_ENABLED(CONFIG_X86);
+module_param_named(vmalloc_small_blocks, vmalloc_small_blocks, bool, 0644);
+
 /* Encode handle of a particular slot in the pool using metadata */
 static inline unsigned long metadata_to_handle(struct zblock_block *block, unsigned int slot)
 {
@@ -98,11 +102,23 @@ static struct zblock_block *alloc_block(struct zblock_pool *pool,
 {
 	struct block_list *block_list = &pool->block_lists[block_type];
 	unsigned int num_pages = block_desc[block_type].num_pages;
-	struct zblock_block *block;
+	struct zblock_block *block = NULL;
+	struct page *page;
 
-	block = __vmalloc_node(PAGE_SIZE * num_pages, PAGE_SIZE, gfp, nid, NULL);
-	if (!block)
-		return NULL;
+	if (!vmalloc_small_blocks && num_pages == 1) {
+		page = __alloc_pages(gfp & ~__GFP_HIGHMEM, 0, nid, NULL);
+		if (page) {
+			page->private = PAGE_SMALL_BLOCK;
+			block = page_address(page);
+		}
+	}
+	if (!block) {
+		block = __vmalloc_node(PAGE_SIZE * num_pages, PAGE_SIZE, gfp, nid, NULL);
+		if (!block)
+			return NULL;
+		page = vmalloc_to_page(block);
+		page->private = 0;
+	}
 
 	/* init block data */
 	init_rcu_head(&block->rcu);

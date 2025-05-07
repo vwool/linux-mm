@@ -11,6 +11,8 @@
 #include <linux/rculist.h>
 #include <linux/types.h>
 
+#define PAGE_SMALL_BLOCK	1
+
 #if PAGE_SIZE == 0x1000
 /* max 64 slots per block, max table size 64 */
 #define SLOT_BITS 6
