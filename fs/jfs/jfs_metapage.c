@@ -238,7 +238,7 @@ static int __metapage_migrate_folio(struct address_space *mapping,
 	int rc;
 
 	mp = folio_to_mp(src, 0);
-	if (mp && metapage_locked(mp))
+	if (metapage_locked(mp))
 		return -EAGAIN;
 
 	rc = filemap_migrate_folio(mapping, dst, src, mode);
