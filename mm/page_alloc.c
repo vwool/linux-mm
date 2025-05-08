@@ -381,16 +381,16 @@ unsigned long get_pfnblock_flags_mask(const struct page *page,
 	return (word >> bitidx) & mask;
 }
 
-#ifdef CONFIG_MEMORY_ISOLATION
 unsigned long get_pageblock_migratetype(const struct page *page)
 {
 	unsigned long flags;
 
 	flags = get_pfnblock_flags_mask(page, page_to_pfn(page),
 			MIGRATETYPE_MASK);
+#ifdef CONFIG_MEMORY_ISOLATION
 	if (flags & PB_migrate_isolate_bit)
 		return MIGRATE_ISOLATE;
-
+#endif
 	return flags;
 }
 
@@ -401,19 +401,12 @@ static __always_inline int get_pfnblock_migratetype(const struct page *page,
 
 	flags = get_pfnblock_flags_mask(page, pfn,
 			MIGRATETYPE_MASK);
+#ifdef CONFIG_MEMORY_ISOLATION
 	if (flags & PB_migrate_isolate_bit)
 		return MIGRATE_ISOLATE;
-
+#endif
 	return flags;
 }
-#else
-static __always_inline int get_pfnblock_migratetype(const struct page *page,
-					unsigned long pfn)
-{
-	return get_pfnblock_flags_mask(page, pfn, MIGRATETYPE_MASK);
-}
-
-#endif
 
 /**
  * set_pfnblock_flags_mask - Set the requested group of flags for a pageblock_nr_pages block of pages
@@ -461,11 +454,13 @@ void set_pageblock_migratetype(struct page *page, int migratetype)
 		migratetype = MIGRATE_UNMOVABLE;
 
 #ifdef CONFIG_MEMORY_ISOLATION
-	if (migratetype == MIGRATE_ISOLATE)
-		set_pageblock_isolate(page);
-	else
+	if (migratetype == MIGRATE_ISOLATE) {
+		set_pfnblock_flags_mask(page, PB_migrate_isolate_bit,
+				page_to_pfn(page), PB_migrate_isolate_bit);
+		return;
+	}
 #endif
-		set_pfnblock_flags_mask(page, (unsigned long)migratetype,
+	set_pfnblock_flags_mask(page, (unsigned long)migratetype,
 				page_to_pfn(page), MIGRATETYPE_MASK);
 }
 

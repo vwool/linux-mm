@@ -112,28 +112,4 @@ static inline void set_pageblock_skip(struct page *page)
 }
 #endif /* CONFIG_COMPACTION */
 
-#ifdef CONFIG_MEMORY_ISOLATION
-#define get_pageblock_isolate(page) \
-	get_pfnblock_flags_mask(page, page_to_pfn(page),	\
-			PB_migrate_isolate_bit)
-#define clear_pageblock_isolate(page) \
-	set_pfnblock_flags_mask(page, 0, page_to_pfn(page),	\
-			PB_migrate_isolate_bit)
-#define set_pageblock_isolate(page) \
-	set_pfnblock_flags_mask(page, PB_migrate_isolate_bit,	\
-			page_to_pfn(page),			\
-			PB_migrate_isolate_bit)
-#else
-static inline bool get_pageblock_isolate(struct page *page)
-{
-	return false;
-}
-static inline void clear_pageblock_isolate(struct page *page)
-{
-}
-static inline void set_pageblock_isolate(struct page *page)
-{
-}
-#endif /* CONFIG_MEMORY_ISOLATION */
-
 #endif	/* PAGEBLOCK_FLAGS_H */

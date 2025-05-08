@@ -112,13 +112,7 @@ extern int page_group_by_mobility_disabled;
 #define MIGRATETYPE_MASK (BIT(PB_migratetype_bits) - 1)
 #endif
 
-#ifdef CONFIG_MEMORY_ISOLATION
 unsigned long get_pageblock_migratetype(const struct page *page);
-#else
-#define get_pageblock_migratetype(page)					\
-	get_pfnblock_flags_mask(page, page_to_pfn(page), MIGRATETYPE_MASK)
-
-#endif
 
 #define folio_migratetype(folio)					\
 	get_pageblock_migratetype(&folio->page)

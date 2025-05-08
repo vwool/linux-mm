@@ -5,7 +5,7 @@
 #ifdef CONFIG_MEMORY_ISOLATION
 static inline bool is_migrate_isolate_page(struct page *page)
 {
-	return get_pageblock_isolate(page);
+	return get_pageblock_migratetype(page) == MIGRATE_ISOLATE;
 }
 static inline bool is_migrate_isolate(int migratetype)
 {
