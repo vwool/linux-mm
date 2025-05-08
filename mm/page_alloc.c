@@ -1975,7 +1975,7 @@ static bool __move_freepages_block_isolate(struct zone *zone,
 	int from_mt;
 	int to_mt;
 
-	if (isolate == get_pageblock_isolate(page))
+	if (isolate == (get_pageblock_migratetype(page) == MIGRATE_ISOLATE))
 		return false;
 
 	if (!prep_move_freepages_block(zone, page, &start_pfn, NULL, NULL))
