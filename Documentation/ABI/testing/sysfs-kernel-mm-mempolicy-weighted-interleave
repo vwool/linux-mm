@@ -24,7 +24,7 @@ Description:	Weight configuration interface for nodeN
 		empty string, ...) will return -EINVAL.
 
 		Changing the weight to a valid value will automatically
-		update the system to manual mode as well.
+		switch the system to manual mode as well.
 
 What:		/sys/kernel/mm/mempolicy/weighted_interleave/auto
 Date:		May 2025
