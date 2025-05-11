@@ -58,15 +58,6 @@ struct mempolicy {
 };
 
 /*
- * A null weighted_interleave_state is interpted as having .mode = "auto",
- * and .iw_table is interpreted as an array of 1s with length nr_node_ids.
- */
-struct weighted_interleave_state {
-	bool mode_auto;
-	u8 iw_table[];
-};
-
-/*
  * Support for managing mempolicy data objects (clone, copy, destroy)
  * The default fast path of a NULL MPOL_DEFAULT policy is always inlined.
  */
