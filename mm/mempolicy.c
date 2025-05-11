@@ -148,6 +148,14 @@ static struct mempolicy preferred_node_policy[MAX_NUMNODES];
  */
 static const int weightiness = 32;
 
+/*
+ * A null weighted_interleave_state is interpreted as having .mode="auto",
+ * and .iw_table is interpreted as an array of 1s with length nr_node_ids.
+ */
+struct weighted_interleave_state {
+	bool mode_auto;
+	u8 iw_table[];
+};
 static struct weighted_interleave_state __rcu *wi_state;
 static unsigned int *node_bw_table;
 
@@ -3561,9 +3569,8 @@ static ssize_t node_store(struct kobject *kobj, struct kobj_attribute *attr,
 	int i;
 
 	node_attr = container_of(attr, struct iw_node_attr, kobj_attr);
-	if (count == 0 || sysfs_streq(buf, ""))
-		weight = 0;
-	else if (kstrtou8(buf, 0, &weight) || weight == 0)
+	if (count == 0 || sysfs_streq(buf, "") ||
+	    kstrtou8(buf, 0, &weight) || weight == 0)
 		return -EINVAL;
 
 	new_wi_state = kzalloc(struct_size(new_wi_state, iw_table, nr_node_ids),
@@ -3630,9 +3637,15 @@ static ssize_t weighted_interleave_auto_store(struct kobject *kobj,
 	if (!input) {
 		old_wi_state = rcu_dereference_protected(wi_state,
 					lockdep_is_held(&wi_state_lock));
-		if (old_wi_state)
-			memcpy(new_wi_state->iw_table, old_wi_state->iw_table,
-					nr_node_ids * sizeof(u8));
+		if (!old_wi_state)
+			goto update_wi_state;
+		if (input == old_wi_state->mode_auto) {
+			mutex_unlock(&wi_state_lock);
+			return count;
+		}
+
+		memcpy(new_wi_state->iw_table, old_wi_state->iw_table,
+					       nr_node_ids * sizeof(u8));
 		goto update_wi_state;
 	}
 
@@ -3707,8 +3720,12 @@ out:
 	kfree(&wi_group->wi_kobj);
 }
 
+static struct kobj_attribute wi_auto_attr =
+	__ATTR(auto, 0664, weighted_interleave_auto_show,
+			   weighted_interleave_auto_store);
+
 static void wi_cleanup(void) {
-	sysfs_remove_file(&wi_group->wi_kobj, &wi_group->auto_kobj_attr.attr);
+	sysfs_remove_file(&wi_group->wi_kobj, &wi_auto_attr.attr);
 	sysfs_wi_node_delete_all();
 	wi_state_free();
 }
@@ -3797,10 +3814,6 @@ static int wi_node_notifier(struct notifier_block *nb,
 
 	return NOTIFY_OK;
 }
-
-static struct kobj_attribute wi_auto_attr =
-	__ATTR(auto, 0664, weighted_interleave_auto_show,
-			   weighted_interleave_auto_store);
 
 static int __init add_weighted_interleave_group(struct kobject *mempolicy_kobj)
 {
