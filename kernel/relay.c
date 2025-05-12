@@ -700,6 +700,41 @@ void relay_flush(struct rchan *chan)
 EXPORT_SYMBOL_GPL(relay_flush);
 
 /**
+ *	relay_dump - dump statistics of the specified channel buffer
+ *	@chan: the channel
+ *	@buf: buf to store statistics
+ *	@len: len of buf to check
+ *	@flags: select particular information to dump
+ */
+void relay_dump(struct rchan *chan, char *buf, int len, int flags)
+{
+	unsigned int i, full_counter = 0;
+	struct rchan_buf *rbuf;
+	int offset = 0;
+
+	if (!chan || !buf || flags & ~RELAY_DUMP_MASK)
+		return;
+
+	if (len < RELAY_DUMP_BUF_MAX_LEN)
+		return;
+
+	if (chan->is_global) {
+		rbuf = *per_cpu_ptr(chan->buf, 0);
+		full_counter = rbuf->stats.full;
+	} else {
+		for_each_possible_cpu(i) {
+			if ((rbuf = *per_cpu_ptr(chan->buf, i)))
+				full_counter += rbuf->stats.full;
+	}
+
+	if (flags & RELAY_DUMP_BUF_FULL)
+		offset += snprintf(buf, sizeof(unsigned int), "%u", full_counter);
+
+	snprintf(buf + offset, 1, "\n");
+}
+EXPORT_SYMBOL_GPL(relay_dump);
+
+/**
  *	relay_file_open - open file op for relay files
  *	@inode: the inode
  *	@filp: the file
