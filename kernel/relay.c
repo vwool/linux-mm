@@ -304,6 +304,7 @@ static void __relay_reset(struct rchan_buf *buf, unsigned int init)
 	buf->data = buf->start;
 	buf->offset = 0;
 	buf->stats.full = 0;
+	buf->stats.big = 0;
 
 	for (i = 0; i < buf->chan->n_subbufs; i++)
 		buf->padding[i] = 0;
@@ -601,7 +602,7 @@ size_t relay_switch_subbuf(struct rchan_buf *buf, size_t length)
 	return length;
 
 toobig:
-	buf->chan->last_toobig = length;
+	buf->stats.big++;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(relay_switch_subbuf);
@@ -661,11 +662,6 @@ void relay_close(struct rchan *chan)
 			if ((buf = *per_cpu_ptr(chan->buf, i)))
 				relay_close_buf(buf);
 
-	if (chan->last_toobig)
-		printk(KERN_WARNING "relay: one or more items not logged "
-		       "[item size (%zd) > sub-buffer size (%zd)]\n",
-		       chan->last_toobig, chan->subbuf_size);
-
 	list_del(&chan->list);
 	kref_put(&chan->kref, relay_destroy_channel);
 	mutex_unlock(&relay_channels_mutex);
@@ -708,7 +704,7 @@ EXPORT_SYMBOL_GPL(relay_flush);
  */
 void relay_dump(struct rchan *chan, char *buf, int len, int flags)
 {
-	unsigned int i, full_counter = 0;
+	unsigned int i, full_counter = 0, big_counter = 0;
 	struct rchan_buf *rbuf;
 	int offset = 0;
 
@@ -721,14 +717,21 @@ void relay_dump(struct rchan *chan, char *buf, int len, int flags)
 	if (chan->is_global) {
 		rbuf = *per_cpu_ptr(chan->buf, 0);
 		full_counter = rbuf->stats.full;
+		big_counter = rbuf->stats.big;
 	} else {
 		for_each_possible_cpu(i) {
-			if ((rbuf = *per_cpu_ptr(chan->buf, i)))
+			if ((rbuf = *per_cpu_ptr(chan->buf, i))) {
 				full_counter += rbuf->stats.full;
+				big_counter += rbuf->stats.big;
+			}
+		}
 	}
 
 	if (flags & RELAY_DUMP_BUF_FULL)
 		offset += snprintf(buf, sizeof(unsigned int), "%u", full_counter);
+
+	if (flags & RELAY_DUMP_WRT_BIG)
+		offset += snprintf(buf, sizeof(unsigned int), "%u", big_counter);
 
 	snprintf(buf + offset, 1, "\n");
 }
