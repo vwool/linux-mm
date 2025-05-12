@@ -31,6 +31,15 @@
 /*
  * Relay buffer error statistics dump
  */
+enum {
+	RELAY_DUMP_BUF_FULL = (1 << 0),
+
+	RELAY_DUMP_LAST = RELAY_DUMP_BUF_FULL,
+	RELAY_DUMP_MASK = (RELAY_DUMP_LAST - 1) | RELAY_DUMP_LAST
+};
+
+#define RELAY_DUMP_BUF_MAX_LEN 32
+
 struct rchan_buf_error_stats
 {
 	unsigned int full;		/* counter for buffer full */
@@ -170,6 +179,7 @@ struct rchan *relay_open(const char *base_filename,
 			 void *private_data);
 extern void relay_close(struct rchan *chan);
 extern void relay_flush(struct rchan *chan);
+extern void relay_dump(struct rchan *chan, char *buf, int len, int flags);
 extern void relay_subbufs_consumed(struct rchan *chan,
 				   unsigned int cpu,
 				   size_t consumed);
