@@ -515,7 +515,7 @@ struct rchan *relay_open(const char *base_filename,
 	kref_init(&chan->kref);
 
 	mutex_lock(&relay_channels_mutex);
-	for_each_online_cpu(i) {
+	for_each_possible_cpu(i) {
 		buf = relay_open_buf(chan, i);
 		if (!buf)
 			goto free_bufs;
