@@ -29,6 +29,25 @@
 #define RELAYFS_CHANNEL_VERSION		7
 
 /*
+ * Relay buffer error statistics dump
+ */
+enum {
+	RELAY_DUMP_BUF_FULL = (1 << 0),
+	RELAY_DUMP_WRT_BIG = (1 << 1),
+
+	RELAY_DUMP_LAST = RELAY_DUMP_WRT_BIG,
+	RELAY_DUMP_MASK = (RELAY_DUMP_LAST - 1) | RELAY_DUMP_LAST
+};
+
+#define RELAY_DUMP_BUF_MAX_LEN 32
+
+struct rchan_buf_error_stats
+{
+	unsigned int full;		/* counter for buffer full */
+	unsigned int big;		/* counter for too big to write */
+};
+
+/*
  * Per-cpu relay channel buffer
  */
 struct rchan_buf
@@ -43,6 +62,7 @@ struct rchan_buf
 	struct irq_work wakeup_work;	/* reader wakeup */
 	struct dentry *dentry;		/* channel file dentry */
 	struct kref kref;		/* channel buffer refcount */
+	struct rchan_buf_error_stats stats; /* error stats */
 	struct page **page_array;	/* array of current buffer pages */
 	unsigned int page_count;	/* number of current buffer pages */
 	unsigned int finalized;		/* buffer has been finalized */
@@ -65,7 +85,6 @@ struct rchan
 	const struct rchan_callbacks *cb; /* client callbacks */
 	struct kref kref;		/* channel refcount */
 	void *private_data;		/* for user-defined data */
-	size_t last_toobig;		/* tried to log event > subbuf size */
 	struct rchan_buf * __percpu *buf; /* per-cpu channel buffers */
 	int is_global;			/* One global buffer ? */
 	struct list_head list;		/* for channel list */
@@ -159,11 +178,9 @@ struct rchan *relay_open(const char *base_filename,
 			 size_t n_subbufs,
 			 const struct rchan_callbacks *cb,
 			 void *private_data);
-extern int relay_late_setup_files(struct rchan *chan,
-				  const char *base_filename,
-				  struct dentry *parent);
 extern void relay_close(struct rchan *chan);
 extern void relay_flush(struct rchan *chan);
+extern void relay_dump(struct rchan *chan, char *buf, int len, int flags);
 extern void relay_subbufs_consumed(struct rchan *chan,
 				   unsigned int cpu,
 				   size_t consumed);
