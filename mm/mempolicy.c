@@ -3543,7 +3543,6 @@ struct iw_node_attr {
 struct sysfs_wi_group {
 	struct kobject wi_kobj;
 	struct mutex kobj_lock;
-	struct kobj_attribute auto_kobj_attr;
 	struct iw_node_attr *nattrs[];
 };
 
@@ -3833,7 +3832,6 @@ static int __init add_weighted_interleave_group(struct kobject *mempolicy_kobj)
 	err = sysfs_create_file(&wi_group->wi_kobj, &wi_auto_attr.attr);
 	if (err)
 		goto err_put_kobj;
-	wi_group->auto_kobj_attr = wi_auto_attr;
 
 	for_each_online_node(nid) {
 		if (!node_state(nid, N_MEMORY))
