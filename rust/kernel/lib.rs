@@ -89,6 +89,8 @@ pub mod transmute;
 pub mod types;
 pub mod uaccess;
 pub mod workqueue;
+#[cfg(CONFIG_ZPOOL)]
+pub mod zpool;
 
 #[doc(hidden)]
 pub use bindings;
