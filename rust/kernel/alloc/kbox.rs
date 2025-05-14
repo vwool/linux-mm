@@ -289,6 +289,28 @@ where
         Ok(Self::new(x, flags)?.into())
     }
 
+    /// Construct a pinned slice of elements.
+    pub fn pin_slice<F, I, E>(mut init: F, len: usize, flags: Flags) -> Result<Pin<Box<[T], A>>, E>
+    where
+        F: FnMut(usize) -> I,
+        I: PinInit<T, E>,
+        E: From<AllocError>,
+    {
+        let mut buffer = super::Vec::<T, A>::with_capacity(len, flags)?;
+        for i in 0..len {
+            let ptr = buffer.spare_capacity_mut().as_mut_ptr().cast();
+            // SAFETY: This address is available to be initialized, and it will either be dropped
+            // on a future error or returned as a pinned location.
+            unsafe { init(i).__pinned_init(ptr)? };
+            // SAFETY: We initialized one more value.
+            unsafe { buffer.inc_len(1) };
+        }
+        let (ptr, _, _) = buffer.into_raw_parts();
+        let slice = core::ptr::slice_from_raw_parts_mut(ptr, len);
+        // SAFETY: This memory holds a valid [T] allocated with the right allocator.
+        Ok(Pin::from(unsafe { Box::from_raw(slice) }))
+    }
+
     /// Convert a [`Box<T,A>`] to a [`Pin<Box<T,A>>`]. If `T` does not implement
     /// [`Unpin`], then `x` will be pinned in memory and can't be moved.
     pub fn into_pin(this: Self) -> Pin<Self> {
