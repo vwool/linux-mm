@@ -8,7 +8,7 @@ use core::mem;
 use core::ptr::{copy_nonoverlapping, null_mut};
 use core::sync::atomic::{AtomicU16,Ordering};
 use kernel::alloc::{Flags,KVec};
-use kernel::bindings::{vmalloc_node,vfree_atomic,spinlock,__spin_lock_init,spin_lock,spin_unlock};
+use kernel::bindings::{vmalloc_node,spinlock,__spin_lock_init,spin_lock,spin_unlock};
 use kernel::bindings::{rcu_read_lock,rcu_read_unlock,kvfree_call_rcu,callback_head};
 use kernel::c_str;
 use kernel::list::{List, ListArc, ListLinks};
@@ -54,20 +54,31 @@ struct SlotInfo {
 }
 
 impl SlotInfo {
+    #[allow(dead_code)]
     fn init(&mut self) {
         for i in 0..(MAX_SLOTS >> 3) {
             self._s[i] = 0
         }
         self.m = AtomicU16::new(0);
     }
+    fn lock_internal(&mut self) {
+        loop {
+            if !self.m.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                break;
+            }
+        }
+    }
+    fn unlock_internal(&mut self) {
+        self.m.store(0, Ordering::SeqCst);
+    }
     fn set(&mut self, slot: u16) {
-        while self.m.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {};
+        self.lock_internal();
         let rem = slot & 7;
         self._s[(slot >> 3) as usize] |= 1 << rem;
-        self.m.store(0, Ordering::Relaxed);
+        self.unlock_internal();
     }
     fn find_and_set(&mut self, max_slots: u16) -> u16 {
-        while self.m.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {};
+        self.lock_internal();
         let i_max = (max_slots + 7) >> 3;
         for i in 0..i_max {
             let mut v = self._s[i as usize];
@@ -78,20 +89,20 @@ impl SlotInfo {
                 }
                 if v & 1 == 0 {
                     self._s[i as  usize] |= 1 << j;
-                    self.m.store(0, Ordering::Relaxed);
+                    self.unlock_internal();
                     return (i << 3) | (j as u16);
                 }
                 v >>= 1; mask >>= 1;
             }
         }
-        self.m.store(0, Ordering::Relaxed);
+        self.unlock_internal();
         MAX_SLOTS as u16
     }
     fn clear(&mut self, slot: u16) {
-        while self.m.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() { {}};
+        self.lock_internal();
         let rem = slot & 7;
         self._s[(slot >> 3) as usize] &= !(1 << rem);
-        self.m.store(0, Ordering::Relaxed);
+        self.unlock_internal();
     }
 }
 
@@ -212,43 +223,36 @@ static BLOCK_DESC: [BlockDesc; NUM_BLOCK_DESC] = [
 	DefineBlock!(4, 4),
 ];
 
+#[pin_data]
 struct ZblockBlock {
     slot_info: SlotInfo,
     rcu_head: callback_head,
-    free_slots: AtomicU16,
-    item: *mut ZblockListItem,
-}
-
-#[pin_data]
-struct ZblockListItem {
-    block: *mut ZblockBlock,
     #[pin]
     links: ListLinks,
+    free_slots: AtomicU16,
 }
 
-impl ZblockListItem {
-    fn new(block: *mut ZblockBlock) -> Result<ListArc<Self>> {
-        ListArc::pin_init(try_pin_init!(Self {
-            block,
-            links <- ListLinks::new(),
-        }), GFP_KERNEL)
+impl ZblockBlock {
+    #[inline]
+    fn as_raw(&self) -> *const ZblockBlock {
+        self
     }
 }
 
 kernel::list::impl_has_list_links! {
-    impl HasListLinks<0> for ZblockListItem { self.links }
+    impl HasListLinks<0> for ZblockBlock { self.links }
 }
 kernel::list::impl_list_arc_safe! {
-    impl ListArcSafe<0> for ZblockListItem { untracked; }
+    impl ListArcSafe<0> for ZblockBlock { untracked; }
 }
 kernel::list::impl_list_item! {
-    impl ListItem<0> for ZblockListItem { using ListLinks; }
+    impl ListItem<0> for ZblockBlock { using ListLinks; }
 }
 
 struct BlockList {
     block_count: usize,
     lock: spinlock,
-    block_list: List<ZblockListItem>,
+    block_list: List<ZblockBlock>,
 }
 
 impl BlockList {
@@ -330,73 +334,68 @@ macro_rules! handle_to_slot {
 }
 
 fn atomic_op_if(a: &AtomicU16, op: impl Fn(u16) -> u16, pred: impl Fn(u16) -> bool)
-                -> Result<u16,u16> {
-    a.fetch_update(Ordering::Acquire, Ordering::Acquire, |x| {
+                -> Option<u16> {
+    loop {
+        let x = a.load(Ordering::SeqCst);
         if !pred(x) {
-            None
+            return None;
         } else {
-            Some(op(x))
+            if a.compare_exchange(x, op(x), Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                continue;
+            }
         }
-    })
-}
-
-fn atomic_op_unless(a: &AtomicU16, op: impl Fn(u16) -> u16, pred: u16) -> Result<u16,u16> {
-    a.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
-        if x == pred {
-            None
-        } else {
-            Some(op(x))
-        }
-    })
+        return Some(x);
+    }
 }
 
 fn cache_insert_block(block: *mut ZblockBlock, list: &mut BlockList)
 {
-    let zblock: &mut ZblockBlock = unsafe { &mut *block };
-
-    if zblock.item.is_null() {
-        let l_arc = ZblockListItem::new(block).expect("REASON");
-        zblock.item = l_arc.into_raw() as *mut ZblockListItem;
-    }
     unsafe {
-        list.block_list.push_front(ListArc::from_raw(zblock.item));
+        list.block_list.push_front(ListArc::from_raw(block));
+    }
+}
+
+fn cache_append_block(block: *mut ZblockBlock, list: &mut BlockList)
+{
+    unsafe {
+        list.block_list.push_back(ListArc::from_raw(block));
     }
 }
 
 fn cache_find_block(list: &mut BlockList, block_type: usize) ->
-                    Result<(*mut ZblockBlock, u16), Error> {
-//    unsafe { rcu_read_lock(); }
+                    Result<(*const ZblockBlock, u16), Error> {
+    unsafe { rcu_read_lock(); }
+    let mut cursor = list.block_list.cursor_front();
     loop {
-        c_spin_lock(&mut list.lock);
-        let mut cursor = list.block_list.cursor_front();
         let peeker = cursor.peek_next();
 
         if peeker.is_none() {
-//            unsafe { rcu_read_unlock(); }
-            c_spin_unlock(&mut list.lock);
+            unsafe { rcu_read_unlock(); }
             return Err(Error::from_errno(-1)); // TODO
         }
-        let block: *mut ZblockBlock = peeker.unwrap().block;
+        let block: *mut ZblockBlock = (*peeker.unwrap()).as_raw() as *mut ZblockBlock;
         let slot: u16;
+        let slots_per_block = BLOCK_DESC[block_type].slots_per_block;
 
         unsafe {
-            let prev_free_slots = atomic_op_unless(&(*block).free_slots, |x| x - 1, 0);
-            if prev_free_slots.is_err() {
-                if !(*block).item.is_null() {
-                    list.block_list.remove(&*(*block).item);
-                    (*block).item = null_mut();
+            let prev_free_slots = atomic_op_if(&(*block).free_slots,
+                                  |x| x - 1, |x| x > 0 && x < slots_per_block);
+
+            if prev_free_slots.is_none() {
+                cursor.move_next();
+                continue;
+            } else if prev_free_slots == Some(1) {
+                c_spin_lock(&mut list.lock);
+                if (*block).free_slots.load(Ordering::SeqCst) == 0 {
+                    let o = list.block_list.remove(&*block);
+                    let _item = o.unwrap().into_raw();
                 }
                 c_spin_unlock(&mut list.lock);
-                continue;
-            } else if prev_free_slots == Ok(1) {
-                list.block_list.remove(&*(*block).item);
-                (*block).item = null_mut();
             }
-            c_spin_unlock(&mut list.lock);
-            slot = (*block).slot_info.find_and_set(BLOCK_DESC[block_type].slots_per_block);
+            slot = (*block).slot_info.find_and_set(slots_per_block);
         }
         pr_debug!("slot {} / {}\n", slot, BLOCK_DESC[block_type].slots_per_block);
-//        unsafe { rcu_read_unlock(); }
+        unsafe { rcu_read_unlock(); }
         return Ok((block,slot));
     }
     // can't really get here
@@ -409,12 +408,10 @@ fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: GfpT, nid: c_int, 
     let list = &mut pool.block_lists[block_type];
     unsafe {
         block = vmalloc_node(PAGE_SIZE * BLOCK_DESC[block_type].n_pages, PAGE_SIZE,
-                             gfp, nid, null_mut()) as *mut ZblockBlock;
+                             gfp | 0x100 /* GFP_ZERO */, nid, null_mut()) as *mut ZblockBlock;
         if block.is_null() {
             return block;
         }
-        (*block).item = core::ptr::null_mut();
-        (*block).slot_info.init();
         (*block).slot_info.set(0);
         let free_slots = BLOCK_DESC[block_type].slots_per_block - 1;
         (*block).free_slots = AtomicU16::new(free_slots);
@@ -447,14 +444,20 @@ impl ZblockRust {
 
 impl Zpool for ZblockRust {
     fn Create(_name: *const u8, gfp: GfpT) -> *mut c_void {
-        let pool = KBox::new(ZblockPool::new(), GFP_KERNEL);
+        let pool = KBox::new(ZblockPool::new(), Flags::new(gfp));
         if pool.is_err() {
             return null_mut();
         }
         let pool = unsafe { Box::into_raw(pool.unwrap_unchecked()) };
         unsafe {
             for i in 0..NUM_BLOCK_DESC {
-                (*pool).tree.try_create_and_insert(BLOCK_DESC[i].slot_size, i, Flags::new(gfp));
+                let t = (*pool).tree.try_create_and_insert(BLOCK_DESC[i].slot_size, i,
+                                                           Flags::new(gfp));
+                if t.is_err() {
+                    let unboxed_zpool = KBox::into_inner(KBox::from_raw(pool));
+                    drop(unboxed_zpool.tree);
+                    return null_mut();
+                }
             }
         }
         pool as *mut c_void
@@ -468,13 +471,13 @@ impl Zpool for ZblockRust {
         }
     }
 
-    fn Malloc(pool: *mut c_void, size: usize, gfp: GfpT, handle: *mut usize, nid: c_int) -> c_int {
+    fn Malloc(p: *mut c_void, size: usize, gfp: GfpT, handle: *mut usize, nid: c_int) -> c_int {
         if size == 0 || size > PAGE_SIZE {
             return -22; // EINVAL
         }
 
-        let p = pool as *mut ZblockPool;
-        let cursor = unsafe { (*p).tree.cursor_lower_bound(&size) };
+        let pool = p as *mut ZblockPool;
+        let cursor = unsafe { (*pool).tree.cursor_lower_bound(&size) };
         if cursor.is_none() { // TODO?
             return -28; // ENOSPC
         }
@@ -482,8 +485,7 @@ impl Zpool for ZblockRust {
         let (_k, v) = binding.current();
         let block_type = *v;
 
-        let the_pool: &mut ZblockPool = unsafe {&mut *(pool as *mut ZblockPool) };
-        let list = &mut the_pool.block_lists[block_type];
+        let list = unsafe { &mut (*pool).block_lists[block_type] };
         let result = cache_find_block(list, block_type);
         if !result.is_err() {
             let (block,slot) = result.unwrap();
@@ -491,33 +493,33 @@ impl Zpool for ZblockRust {
             return 0;
         }
 
-        let block = alloc_block(the_pool, block_type, gfp, nid, handle);
+        let block = unsafe { alloc_block(&mut *pool, block_type, gfp, nid, handle) };
         if block.is_null() {
             return -1; // TODO
         }
         return 0;
     }
-    fn Free(pool: *mut c_void, handle: usize) {
+    fn Free(p: *mut c_void, handle: usize) {
         let block: *mut ZblockBlock = handle_to_block!(handle);
-        let zblock: &mut ZblockBlock = unsafe { &mut *block };
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
-        let the_pool = unsafe { &mut *(pool as *mut ZblockPool) };
-        let list = &mut the_pool.block_lists[block_type];
-
-        zblock.slot_info.clear(slot);
+        let pool = p as *mut ZblockPool;
+        let list = unsafe { &mut (*pool).block_lists[block_type] };
 
         c_spin_lock(&mut list.lock);
-        let prev_free_slots = zblock.free_slots.fetch_add(1, Ordering::Acquire) as u16;
+        unsafe { (*block).slot_info.clear(slot) };
+        let prev_free_slots = unsafe { (*block).free_slots.fetch_add(1, Ordering::SeqCst) };
         if prev_free_slots + 1 == BLOCK_DESC[block_type].slots_per_block {
             list.block_count -= 1;
-            unsafe { list.block_list.remove(&*zblock.item) };
-            c_spin_unlock(&mut list.lock);
             unsafe {
-                vfree_atomic(block as *mut c_void)
+                let o = list.block_list.remove(&*block);
+                let _item = o.unwrap().into_raw();
+                c_spin_unlock(&mut list.lock);
+                kvfree_call_rcu(&mut (*block).rcu_head as *mut callback_head, block as *mut c_void);
+                return;
             };
         } else if prev_free_slots == 0 {
-            cache_insert_block(block as *mut ZblockBlock, list);
+            cache_append_block(block as *mut ZblockBlock, list);
             c_spin_unlock(&mut list.lock);
         } else {
             c_spin_unlock(&mut list.lock);
