@@ -8,8 +8,7 @@ use core::mem;
 use core::ptr::{copy_nonoverlapping, null_mut};
 use core::sync::atomic::{AtomicU16,Ordering};
 use kernel::alloc::{Flags,KVec};
-use kernel::bindings::{vmalloc_node,spinlock,__spin_lock_init,spin_lock,spin_unlock};
-use kernel::bindings::{rcu_read_lock,rcu_read_unlock,kvfree_call_rcu,callback_head};
+use kernel::bindings::{vmalloc_node,vfree_atomic,spinlock,__spin_lock_init,spin_lock,spin_unlock};
 use kernel::c_str;
 use kernel::list::{List, ListArc, ListLinks};
 use kernel::prelude::*;
@@ -46,7 +45,6 @@ macro_rules! SLOT_SIZE {
     ($n: expr, $o: expr) => (round_down!(BLOCK_DATA_SIZE!($o) / $n, 16))
 }
 
-//#[derive(Copy, Clone)]
 struct SlotInfo {
     _s: [u8; MAX_SLOTS >> 3],
     m: AtomicU16,
@@ -233,7 +231,6 @@ macro_rules! DescriptorArray {
 #[pin_data]
 struct ZblockBlock {
     slot_info: SlotInfo,
-    rcu_head: callback_head,
     #[pin]
     links: ListLinks,
     free_slots: AtomicU16,
@@ -372,7 +369,6 @@ fn cache_append_block(block: *mut ZblockBlock, list: &mut BlockList)
 fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
                     Result<(*const ZblockBlock, u16), Error> {
     let slots_per_block = block_desc.slots_per_block;
-    unsafe { rcu_read_lock(); }
     c_spin_lock(&mut list.lock);
     loop {
         let mut cursor = list.block_list.cursor_front();
@@ -380,7 +376,6 @@ fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
 
         if peeker.is_none() {
             c_spin_unlock(&mut list.lock);
-            unsafe { rcu_read_unlock(); }
             return Err(Error::from_errno(-1)); // TODO
         }
         let block: *mut ZblockBlock = (*peeker.unwrap()).as_raw() as *mut ZblockBlock;
@@ -402,7 +397,6 @@ fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
         slot = the_block.slot_info.find_and_set(slots_per_block);
         pr_debug!("slot {} / {}\n", slot, block_desc.slots_per_block);
         c_spin_unlock(&mut list.lock);
-        unsafe { rcu_read_unlock(); }
         return Ok((block,slot));
     }
     // can't really get here
@@ -518,6 +512,7 @@ impl Zpool for ZblockRust {
         let list = &mut the_pool.block_lists[block_type];
         let slots_per_block = BLOCK_DESC!(the_pool, block_type).slots_per_block;
 
+        unsafe { (*block).slot_info.clear(slot) };
         c_spin_lock(&mut list.lock);
         let prev_free_slots = the_block.free_slots.fetch_add(1, Ordering::SeqCst);
         match prev_free_slots {
@@ -528,13 +523,11 @@ impl Zpool for ZblockRust {
                     None => { pr_info!("block already removed 2\n");},
                     Some(item) => { let _item = item.into_raw(); },
                 }
-                unsafe { kvfree_call_rcu(&mut the_block.rcu_head as *mut callback_head,
-                                         block as *mut c_void) };
+                unsafe { vfree_atomic(block as *mut c_void) };
             },
             0 => { cache_append_block(block, list); },
             _ => {},
         }
-        unsafe { (*block).slot_info.clear(slot) };
         c_spin_unlock(&mut list.lock);
     }
 
