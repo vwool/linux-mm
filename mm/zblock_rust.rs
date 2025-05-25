@@ -28,7 +28,6 @@ module! {
 const SLOT_BITS: usize = PAGE_SHIFT - 6; // reserve 6 bits for the table
 const MAX_SLOTS: usize = 1 << SLOT_BITS;
 const SLOT_MASK: usize = (1 << SLOT_BITS) - 1;
-const NUM_BLOCK_DESC: usize = 61; //37;
 
 macro_rules! round_up {
     ($n: expr, $o: expr) => ((($n + $o - 1) / $o) * $o)
@@ -50,7 +49,7 @@ macro_rules! SLOT_SIZE {
 //#[derive(Copy, Clone)]
 struct SlotInfo {
     _s: [u8; MAX_SLOTS >> 3],
-    m: AtomicU16, 
+    m: AtomicU16,
 }
 
 impl SlotInfo {
@@ -118,110 +117,118 @@ macro_rules! DefineBlock {
         BlockDesc{slot_size: SLOT_SIZE!($n, $o), slots_per_block: $n, n_pages: $o }
     })
 }
-/*
-static BLOCK_DESC: [BlockDesc; NUM_BLOCK_DESC] = [
-    DefineBlock!(28, 1),
-    DefineBlock!(18, 1),
-    DefineBlock!(12, 1),
-    DefineBlock!(10, 1),
-    DefineBlock!(17, 2),
-    DefineBlock!(15, 2),
-    DefineBlock!(13, 2),
-    DefineBlock!(6, 1),
-    DefineBlock!(11, 2),
-    DefineBlock!(5, 1),
-	DefineBlock!(19, 4),
-	DefineBlock!(9, 2),
-	DefineBlock!(17, 4),
-	DefineBlock!(4, 1),
-	DefineBlock!(23, 6),
-	DefineBlock!(11, 3),
-	DefineBlock!(7, 2),
-	DefineBlock!(10, 3),
-	DefineBlock!(19, 6),
-	DefineBlock!(6, 2),
-	DefineBlock!(14, 5),
-	DefineBlock!(8, 3),
-	DefineBlock!(5, 2),
-	DefineBlock!(12, 5),
-	DefineBlock!(9, 4),
-	DefineBlock!(15, 7),
-	DefineBlock!(2, 1),
-	DefineBlock!(15, 8),
-	DefineBlock!(9, 5),
-	DefineBlock!(12, 7),
-	DefineBlock!(13, 8),
-	DefineBlock!(6, 4),
-	DefineBlock!(11, 8),
-	DefineBlock!(9, 7),
-	DefineBlock!(6, 5),
-	DefineBlock!(9, 8),
-	DefineBlock!(4, 4),
-];
-*/
-static BLOCK_DESC: [BlockDesc; NUM_BLOCK_DESC] = [
-	DefineBlock!(185, 1),
-	DefineBlock!(113, 1),
-	DefineBlock!(86, 1),
-	DefineBlock!(72, 1),
-	DefineBlock!(58, 1),
-	DefineBlock!(49, 1),
-	DefineBlock!(42, 1),
-	DefineBlock!(37, 1),
-	DefineBlock!(33, 1),
-	DefineBlock!(59, 2),
-	DefineBlock!(27, 1),
-	DefineBlock!(25, 1),
-	DefineBlock!(23, 1),
-	DefineBlock!(21, 1),
-	DefineBlock!(39, 2),
-	DefineBlock!(37, 2),
-	DefineBlock!(35, 2),
-	DefineBlock!(33, 2),
-	DefineBlock!(31, 2),
-	DefineBlock!(29, 2),
-	DefineBlock!(27, 2),
-	DefineBlock!(25, 2),
-	DefineBlock!(12, 1),
-	DefineBlock!(11, 1),
-	DefineBlock!(21, 2),
-	DefineBlock!(10, 1),
-	DefineBlock!(19, 2),
-	DefineBlock!(9, 1),
-	DefineBlock!(17, 2),
-	DefineBlock!(8, 1),
-	DefineBlock!(15, 2),
-	DefineBlock!(14, 2),
-	DefineBlock!(27, 4),
-	DefineBlock!(13, 2),
-	DefineBlock!(25, 4),
-	DefineBlock!(12, 2),
-	DefineBlock!(23, 4),
-	DefineBlock!(11, 2),
-	DefineBlock!(21, 4),
-	DefineBlock!(10, 2),
-	DefineBlock!(19, 4),
-	DefineBlock!(9, 2),
-	DefineBlock!(17, 4),
-	DefineBlock!(4, 1),
-	DefineBlock!(23, 6),
-	DefineBlock!(11, 3),
-	DefineBlock!(7, 2),
-	DefineBlock!(10, 3),
-	DefineBlock!(16, 5),
-	DefineBlock!(6, 2),
-	DefineBlock!(11, 4),
-	DefineBlock!(8, 3),
-	DefineBlock!(5, 2),
-	DefineBlock!(7, 3),
-	DefineBlock!(11, 5),
-	DefineBlock!(4, 2),
-	DefineBlock!(9, 5),
-	DefineBlock!(8, 5),
-	DefineBlock!(3, 2),
-	DefineBlock!(7, 6),
-	DefineBlock!(4, 4),
-];
+
+macro_rules! BLOCK_DESC { ($n: expr, $i: expr) => ({ $n.block_desc[$i] }) }
+macro_rules! NUM_BLOCK_DESC { ($n: expr) => { $n.block_desc.len() } }
+
+macro_rules! DescriptorArray {
+    ($n: expr) => ({
+        match $n {
+            0x1000 => kernel::kvec![
+                DefineBlock!(28, 1),
+                DefineBlock!(18, 1),
+                DefineBlock!(12, 1),
+                DefineBlock!(10, 1),
+                DefineBlock!(17, 2),
+                DefineBlock!(15, 2),
+                DefineBlock!(13, 2),
+                DefineBlock!(6, 1),
+                DefineBlock!(11, 2),
+                DefineBlock!(5, 1),
+                DefineBlock!(19, 4),
+                DefineBlock!(9, 2),
+                DefineBlock!(17, 4),
+                DefineBlock!(4, 1),
+                DefineBlock!(23, 6),
+                DefineBlock!(11, 3),
+                DefineBlock!(7, 2),
+                DefineBlock!(10, 3),
+                DefineBlock!(19, 6),
+                DefineBlock!(6, 2),
+                DefineBlock!(14, 5),
+                DefineBlock!(8, 3),
+                DefineBlock!(5, 2),
+                DefineBlock!(12, 5),
+                DefineBlock!(9, 4),
+                DefineBlock!(15, 7),
+                DefineBlock!(2, 1),
+                DefineBlock!(15, 8),
+                DefineBlock!(9, 5),
+                DefineBlock!(12, 7),
+                DefineBlock!(13, 8),
+                DefineBlock!(6, 4),
+                DefineBlock!(11, 8),
+                DefineBlock!(9, 7),
+                DefineBlock!(6, 5),
+                DefineBlock!(9, 8),
+                DefineBlock!(7, 8),
+           ],
+            _ => kernel::kvec![
+                DefineBlock!(185, 1),
+                DefineBlock!(113, 1),
+                DefineBlock!(86, 1),
+                DefineBlock!(72, 1),
+                DefineBlock!(58, 1),
+                DefineBlock!(49, 1),
+                DefineBlock!(42, 1),
+                DefineBlock!(37, 1),
+                DefineBlock!(33, 1),
+                DefineBlock!(59, 2),
+                DefineBlock!(27, 1),
+                DefineBlock!(25, 1),
+                DefineBlock!(23, 1),
+                DefineBlock!(21, 1),
+                DefineBlock!(39, 2),
+                DefineBlock!(37, 2),
+                DefineBlock!(35, 2),
+                DefineBlock!(33, 2),
+                DefineBlock!(31, 2),
+                DefineBlock!(29, 2),
+                DefineBlock!(27, 2),
+                DefineBlock!(25, 2),
+                DefineBlock!(12, 1),
+                DefineBlock!(11, 1),
+                DefineBlock!(21, 2),
+                DefineBlock!(10, 1),
+                DefineBlock!(19, 2),
+                DefineBlock!(9, 1),
+                DefineBlock!(17, 2),
+                DefineBlock!(8, 1),
+                DefineBlock!(15, 2),
+                DefineBlock!(14, 2),
+                DefineBlock!(27, 4),
+                DefineBlock!(13, 2),
+                DefineBlock!(25, 4),
+                DefineBlock!(12, 2),
+                DefineBlock!(23, 4),
+                DefineBlock!(11, 2),
+                DefineBlock!(21, 4),
+                DefineBlock!(10, 2),
+                DefineBlock!(19, 4),
+                DefineBlock!(9, 2),
+                DefineBlock!(17, 4),
+                DefineBlock!(4, 1),
+                DefineBlock!(23, 6),
+                DefineBlock!(11, 3),
+                DefineBlock!(7, 2),
+                DefineBlock!(10, 3),
+                DefineBlock!(16, 5),
+                DefineBlock!(6, 2),
+                DefineBlock!(11, 4),
+                DefineBlock!(8, 3),
+                DefineBlock!(5, 2),
+                DefineBlock!(7, 3),
+                DefineBlock!(11, 5),
+                DefineBlock!(4, 2),
+                DefineBlock!(9, 5),
+                DefineBlock!(8, 5),
+                DefineBlock!(3, 2),
+                DefineBlock!(7, 6),
+                DefineBlock!(4, 4),
+           ],
+        }
+    })
+}
 
 #[pin_data]
 struct ZblockBlock {
@@ -275,16 +282,18 @@ impl BlockList {
 }
 
 struct ZblockPool {
-    block_lists: [BlockList; NUM_BLOCK_DESC],
+    block_desc: KVec<BlockDesc>,
+    block_lists: KVec<BlockList>,
     tree: RBTree<usize,usize>
 }
 
 impl ZblockPool {
-    fn new() -> Self {
-        Self {
-            block_lists: core::array::from_fn(|_i| BlockList::new()),
+    fn new(page_size: usize) -> Result<Self> {
+        Ok(Self {
+            block_desc: DescriptorArray!(page_size)?,
+            block_lists: KVec::new(),
             tree: RBTree::new(),
-        }
+        })
     }
 }
 
@@ -299,7 +308,6 @@ fn c_spin_lock(lock: &mut spinlock) {
 fn c_spin_unlock(lock: &mut spinlock) {
     unsafe { spin_unlock(lock); }
 }
-
 
 macro_rules! metadata_to_handle {
     ($bl:expr, $typ:expr, $sl: expr) => {
@@ -335,16 +343,15 @@ macro_rules! handle_to_slot {
 
 fn atomic_op_if(a: &AtomicU16, op: impl Fn(u16) -> u16, pred: impl Fn(u16) -> bool)
                 -> Option<u16> {
+    let mut x = a.load(Ordering::SeqCst);
     loop {
-        let x = a.load(Ordering::SeqCst);
         if !pred(x) {
             return None;
-        } else {
-            if a.compare_exchange(x, op(x), Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                continue;
-            }
         }
-        return Some(x);
+        match a.compare_exchange_weak(x, op(x), Ordering::SeqCst, Ordering::Relaxed) {
+            Ok(y) => return Some(y),
+            Err(z) => x = z,
+        }
     }
 }
 
@@ -362,39 +369,39 @@ fn cache_append_block(block: *mut ZblockBlock, list: &mut BlockList)
     }
 }
 
-fn cache_find_block(list: &mut BlockList, block_type: usize) ->
+fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
                     Result<(*const ZblockBlock, u16), Error> {
+    let slots_per_block = block_desc.slots_per_block;
     unsafe { rcu_read_lock(); }
-    let mut cursor = list.block_list.cursor_front();
+    c_spin_lock(&mut list.lock);
     loop {
+        let mut cursor = list.block_list.cursor_front();
         let peeker = cursor.peek_next();
 
         if peeker.is_none() {
+            c_spin_unlock(&mut list.lock);
             unsafe { rcu_read_unlock(); }
             return Err(Error::from_errno(-1)); // TODO
         }
         let block: *mut ZblockBlock = (*peeker.unwrap()).as_raw() as *mut ZblockBlock;
+        let the_block: &mut ZblockBlock = unsafe {&mut *(block as *mut ZblockBlock) };
         let slot: u16;
-        let slots_per_block = BLOCK_DESC[block_type].slots_per_block;
-
-        unsafe {
-            let prev_free_slots = atomic_op_if(&(*block).free_slots,
-                                  |x| x - 1, |x| x > 0 && x < slots_per_block);
-
-            if prev_free_slots.is_none() {
-                cursor.move_next();
-                continue;
-            } else if prev_free_slots == Some(1) {
-                c_spin_lock(&mut list.lock);
-                if (*block).free_slots.load(Ordering::SeqCst) == 0 {
-                    let o = list.block_list.remove(&*block);
-                    let _item = o.unwrap().into_raw();
+        let prev_free_slots = atomic_op_if(&the_block.free_slots,
+                                           |x| x - 1, |x| x > 0 && x < slots_per_block);
+        match prev_free_slots {
+            None => continue,
+            Some (1) => {
+                let o = unsafe { list.block_list.remove(the_block) };
+                match o {
+                    None => { pr_info!("block already removed 1\n");},
+                    Some(item) => { let _item = item.into_raw(); },
                 }
-                c_spin_unlock(&mut list.lock);
+            },
+            Some (_) => {}
             }
-            slot = (*block).slot_info.find_and_set(slots_per_block);
-        }
-        pr_debug!("slot {} / {}\n", slot, BLOCK_DESC[block_type].slots_per_block);
+        slot = the_block.slot_info.find_and_set(slots_per_block);
+        pr_debug!("slot {} / {}\n", slot, block_desc.slots_per_block);
+        c_spin_unlock(&mut list.lock);
         unsafe { rcu_read_unlock(); }
         return Ok((block,slot));
     }
@@ -407,18 +414,18 @@ fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: GfpT, nid: c_int, 
     let block: *mut ZblockBlock;
     let list = &mut pool.block_lists[block_type];
     unsafe {
-        block = vmalloc_node(PAGE_SIZE * BLOCK_DESC[block_type].n_pages, PAGE_SIZE,
+        block = vmalloc_node(PAGE_SIZE * BLOCK_DESC!(pool, block_type).n_pages, PAGE_SIZE,
                              gfp | 0x100 /* GFP_ZERO */, nid, null_mut()) as *mut ZblockBlock;
         if block.is_null() {
             return block;
         }
         (*block).slot_info.set(0);
-        let free_slots = BLOCK_DESC[block_type].slots_per_block - 1;
+        let free_slots = BLOCK_DESC!(pool, block_type).slots_per_block - 1;
         (*block).free_slots = AtomicU16::new(free_slots);
         *handle = metadata_to_handle!(block, block_type, 0);
     }
     c_spin_lock(&mut list.lock);
-    cache_insert_block(block as *mut ZblockBlock, list);
+    cache_insert_block(block, list);
     c_spin_unlock(&mut list.lock);
     list.block_count += 1;
 
@@ -438,37 +445,40 @@ static ZPOOL_DRIVER: ZpoolDriver<ZblockRust> = ZpoolDriver::new(RUSTY_BLOCK);
 
 impl ZblockRust {
     const fn new() -> Self {
-        Self { _dummy: 0 }
+        Self {
+            _dummy: 0,
+        }
     }
 }
 
 impl Zpool for ZblockRust {
     fn Create(_name: *const u8, gfp: GfpT) -> *mut c_void {
-        let pool = KBox::new(ZblockPool::new(), Flags::new(gfp));
+        let pool = KBox::new(ZblockPool::new(PAGE_SIZE).unwrap(), Flags::new(gfp));
         if pool.is_err() {
             return null_mut();
         }
         let pool = unsafe { Box::into_raw(pool.unwrap_unchecked()) };
         unsafe {
-            for i in 0..NUM_BLOCK_DESC {
-                let t = (*pool).tree.try_create_and_insert(BLOCK_DESC[i].slot_size, i,
+            for i in 0..NUM_BLOCK_DESC!(*pool) {
+                let a = (*pool).block_lists.push(BlockList::new(), Flags::new(gfp));
+                let t = (*pool).tree.try_create_and_insert(BLOCK_DESC!((*pool), i).slot_size, i,
                                                            Flags::new(gfp));
-                if t.is_err() {
+                if a.is_err() || t.is_err() {
                     let unboxed_zpool = KBox::into_inner(KBox::from_raw(pool));
                     drop(unboxed_zpool.tree);
+                    drop(unboxed_zpool.block_lists);
                     return null_mut();
                 }
             }
+            pr_info!("Created pool with {} block lists\n", NUM_BLOCK_DESC!(*pool));
         }
         pool as *mut c_void
     }
     fn Destroy(pool: *mut c_void) {
         let zpool = pool as *mut ZblockPool;
-        unsafe {
-            let unboxed_zpool = KBox::into_inner(KBox::from_raw(zpool));
-            drop(unboxed_zpool.tree);
-            // TODO drop block lists
-        }
+        let unboxed_zpool = unsafe { KBox::into_inner(KBox::from_raw(zpool)) };
+        drop(unboxed_zpool.tree);
+        drop(unboxed_zpool.block_lists);
     }
 
     fn Malloc(p: *mut c_void, size: usize, gfp: GfpT, handle: *mut usize, nid: c_int) -> c_int {
@@ -476,8 +486,8 @@ impl Zpool for ZblockRust {
             return -22; // EINVAL
         }
 
-        let pool = p as *mut ZblockPool;
-        let cursor = unsafe { (*pool).tree.cursor_lower_bound(&size) };
+        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
+        let cursor = the_pool.tree.cursor_lower_bound(&size);
         if cursor.is_none() { // TODO?
             return -28; // ENOSPC
         }
@@ -485,15 +495,15 @@ impl Zpool for ZblockRust {
         let (_k, v) = binding.current();
         let block_type = *v;
 
-        let list = unsafe { &mut (*pool).block_lists[block_type] };
-        let result = cache_find_block(list, block_type);
+        let list = &mut the_pool.block_lists[block_type];
+        let result = cache_find_block(list, &the_pool.block_desc[block_type]);
         if !result.is_err() {
             let (block,slot) = result.unwrap();
             unsafe { *handle = metadata_to_handle!(block, block_type, slot) };
             return 0;
         }
 
-        let block = unsafe { alloc_block(&mut *pool, block_type, gfp, nid, handle) };
+        let block = alloc_block(the_pool, block_type, gfp, nid, handle);
         if block.is_null() {
             return -1; // TODO
         }
@@ -503,50 +513,54 @@ impl Zpool for ZblockRust {
         let block: *mut ZblockBlock = handle_to_block!(handle);
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
-        let pool = p as *mut ZblockPool;
-        let list = unsafe { &mut (*pool).block_lists[block_type] };
+        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
+        let the_block: &mut ZblockBlock = unsafe {&mut *(block as *mut ZblockBlock) };
+        let list = &mut the_pool.block_lists[block_type];
+        let slots_per_block = BLOCK_DESC!(the_pool, block_type).slots_per_block;
 
         c_spin_lock(&mut list.lock);
-        unsafe { (*block).slot_info.clear(slot) };
-        let prev_free_slots = unsafe { (*block).free_slots.fetch_add(1, Ordering::SeqCst) };
-        if prev_free_slots + 1 == BLOCK_DESC[block_type].slots_per_block {
-            list.block_count -= 1;
-            unsafe {
-                let o = list.block_list.remove(&*block);
-                let _item = o.unwrap().into_raw();
-                c_spin_unlock(&mut list.lock);
-                kvfree_call_rcu(&mut (*block).rcu_head as *mut callback_head, block as *mut c_void);
-                return;
-            };
-        } else if prev_free_slots == 0 {
-            cache_append_block(block as *mut ZblockBlock, list);
-            c_spin_unlock(&mut list.lock);
-        } else {
-            c_spin_unlock(&mut list.lock);
+        let prev_free_slots = the_block.free_slots.fetch_add(1, Ordering::SeqCst);
+        match prev_free_slots {
+            val if val == slots_per_block - 1 => {
+                list.block_count -= 1;
+                let o = unsafe { list.block_list.remove(the_block) };
+                match o {
+                    None => { pr_info!("block already removed 2\n");},
+                    Some(item) => { let _item = item.into_raw(); },
+                }
+                unsafe { kvfree_call_rcu(&mut the_block.rcu_head as *mut callback_head,
+                                         block as *mut c_void) };
+            },
+            0 => { cache_append_block(block, list); },
+            _ => {},
         }
+        unsafe { (*block).slot_info.clear(slot) };
+        c_spin_unlock(&mut list.lock);
     }
 
-    fn ReadBegin(_pool: *mut c_void, handle: usize, _local_copy: *mut c_void) -> *mut c_void {
+    fn ReadBegin(p: *mut c_void, handle: usize, _local_copy: *mut c_void) -> *mut c_void {
+        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
         let block: *mut ZblockBlock = handle_to_block!(handle);
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
 
         let map_addr = (block as u64) + (ZBLOCK_HEADER_SIZE!() as u64) +
-            (slot as u64) * (BLOCK_DESC[block_type].slot_size as u64);
+            (slot as u64) * (BLOCK_DESC!(the_pool, block_type).slot_size as u64);
         map_addr as *mut c_void
     }
 
     fn ReadEnd(_pool: *mut c_void, _handle: usize, _handle_mem: *mut c_void) {
     }
 
-    fn Write(_pool: *mut c_void, handle: usize, handle_mem: *mut c_void, mem_len: usize) {
+    fn Write(p: *mut c_void, handle: usize, handle_mem: *mut c_void, mem_len: usize) {
+        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
         let block: *mut ZblockBlock = handle_to_block!(handle);
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
         pr_debug!("write: handle {:x}, slot {}, type {}\n", handle, slot, block_type);
 
         let map_addr = (block as u64) + (ZBLOCK_HEADER_SIZE!() as u64) +
-            (slot as u64) * (BLOCK_DESC[block_type].slot_size as u64);
+            (slot as u64) * (BLOCK_DESC!(the_pool, block_type).slot_size as u64);
         unsafe { copy_nonoverlapping(handle_mem, map_addr as *mut c_void, mem_len); }
     }
 
@@ -554,8 +568,8 @@ impl Zpool for ZblockRust {
         let mut total_pages: usize = 0;
         let the_pool: &mut ZblockPool = unsafe {&mut *(pool as *mut ZblockPool) };
 
-        for i in 0..NUM_BLOCK_DESC {
-            total_pages += the_pool.block_lists[i].block_count * BLOCK_DESC[i].n_pages;
+        for i in 0..NUM_BLOCK_DESC!(the_pool) {
+            total_pages += the_pool.block_lists[i].block_count * BLOCK_DESC!(the_pool, i).n_pages;
         }
         total_pages as u64
     }
