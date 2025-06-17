@@ -1,20 +1,21 @@
 use crate::{
     bindings,
     error::Result,
+    kernel::alloc::Flags,
     str::CStr,
     types::Opaque,
-    ThisModule,
 };
 use core::ffi::{c_uchar,c_void,c_int};
+use kernel::ThisModule;
 
 /// zpool API
 pub trait Zpool {
     /// pool creation
-    fn create(name: *const c_uchar, gfp: u32) -> *mut c_void;
+    fn create(name: *const c_uchar, gfp: Flags) -> *mut c_void;
     /// pool destruction
     fn destroy(pool: *mut c_void);
     /// object allocation
-    fn malloc(pool: *mut c_void, size: usize, gfp: u32, handle: *mut usize, nid: c_int) -> c_int;
+    fn malloc(pool: *mut c_void, size: usize, gfp: Flags, handle: *mut usize, nid: c_int) -> c_int;
     /// object release
     fn free(pool: *mut c_void, handle: usize);
     /// object read begin
@@ -75,14 +76,14 @@ impl<T:Zpool> ZpoolDriver<T> {
 
 impl<T: Zpool> Registration for ZpoolDriver<T> {
     extern "C" fn _create(name: *const c_uchar, gfp: u32) -> *mut c_void {
-        T::create(name, gfp)
+        T::create(name, Flags::new(gfp))
     }
     extern "C" fn _destroy(pool: *mut c_void) {
         T::destroy(pool)
     }
     extern "C" fn _malloc(pool: *mut c_void, size: usize, gfp: u32, handle: *mut usize, nid: c_int)
                     -> c_int {
-        T::malloc(pool, size, gfp, handle, nid)
+        T::malloc(pool, size, Flags::new(gfp), handle, nid)
     }
     extern "C" fn _free(pool: *mut c_void, handle: usize) {
         T::free(pool, handle)

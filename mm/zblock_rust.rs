@@ -9,6 +9,7 @@ use core::ptr::{copy_nonoverlapping, null_mut};
 use core::sync::atomic::{AtomicU16,Ordering};
 use kernel::alloc::{Flags,KVec};
 use kernel::bindings::{vmalloc_node,vfree_atomic,spinlock,__spin_lock_init,spin_lock,spin_unlock};
+use kernel::bindings::__GFP_ZERO;
 use kernel::c_str;
 use kernel::list::{List, ListArc, ListLinks};
 use kernel::prelude::*;
@@ -294,9 +295,17 @@ impl ZblockPool {
     }
 }
 
-type GfpT = u32;
-
 // Helpers
+
+fn from_c_pool(pool: *mut c_void) -> &'static mut ZblockPool {
+    let the_pool: &mut ZblockPool = unsafe {&mut *(pool as *mut ZblockPool) };
+    the_pool
+}
+
+fn from_c_block(block: *mut ZblockBlock) -> &'static mut ZblockBlock {
+    let the_block: &mut ZblockBlock = unsafe {&mut *(block as *mut ZblockBlock) };
+    the_block
+}
 
 fn c_spin_lock(lock: &mut spinlock) {
     unsafe { spin_lock(lock); }
@@ -376,10 +385,10 @@ fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
 
         if peeker.is_none() {
             c_spin_unlock(&mut list.lock);
-            return Err(Error::from_errno(-1)); // TODO
+            return Err(ENOENT);
         }
         let block: *mut ZblockBlock = (*peeker.unwrap()).as_raw() as *mut ZblockBlock;
-        let the_block: &mut ZblockBlock = unsafe {&mut *(block as *mut ZblockBlock) };
+        let the_block = from_c_block(block);
         let slot: u16;
         let prev_free_slots = atomic_op_if(&the_block.free_slots,
                                            |x| x - 1, |x| x > 0 && x < slots_per_block);
@@ -402,16 +411,16 @@ fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
     // can't really get here
 }
 
-fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: GfpT, nid: c_int, handle: *mut usize)
-                -> *mut ZblockBlock
+fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: Flags, nid: c_int, handle: *mut usize)
+                -> i32
 {
     let block: *mut ZblockBlock;
     let list = &mut pool.block_lists[block_type];
     unsafe {
         block = vmalloc_node(PAGE_SIZE * BLOCK_DESC!(pool, block_type).n_pages, PAGE_SIZE,
-                             gfp | 0x100 /* GFP_ZERO */, nid, null_mut()) as *mut ZblockBlock;
+                             gfp.as_raw() | __GFP_ZERO, nid, null_mut()) as *mut ZblockBlock;
         if block.is_null() {
-            return block;
+            return -(kernel::bindings::ENOMEM as i32);
         }
         (*block).slot_info.set(0);
         let free_slots = BLOCK_DESC!(pool, block_type).slots_per_block - 1;
@@ -423,40 +432,40 @@ fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: GfpT, nid: c_int, 
     c_spin_unlock(&mut list.lock);
     list.block_count += 1;
 
-    block
+    0
 }
 
 #[derive(Copy,Clone)]
 struct ZblockRust {
-    _dummy: u32,
+    name: &'static CStr,
 }
 
-unsafe impl Sync for ZblockRust {}
-unsafe impl Send for ZblockRust {}
-
-static RUSTY_BLOCK: ZblockRust = ZblockRust::new();
-static ZPOOL_DRIVER: ZpoolDriver<ZblockRust> = ZpoolDriver::new(RUSTY_BLOCK);
-
 impl ZblockRust {
-    const fn new() -> Self {
+    const fn new(mod_name: &'static CStr) -> Self {
         Self {
-            _dummy: 0,
+            name: mod_name,
         }
+    }
+    const fn get_name(&self) -> &'static CStr {
+        self.name
     }
 }
 
+static RUSTY_BLOCK: ZblockRust = ZblockRust::new(c_str!("zblock_rust"));
+static ZPOOL_DRIVER: ZpoolDriver<ZblockRust> = ZpoolDriver::new(RUSTY_BLOCK);
+
 impl Zpool for ZblockRust {
-    fn Create(_name: *const u8, gfp: GfpT) -> *mut c_void {
-        let pool = KBox::new(ZblockPool::new(PAGE_SIZE).unwrap(), Flags::new(gfp));
+    fn create(_name: *const u8, gfp: Flags) -> *mut c_void {
+        let pool = KBox::new(ZblockPool::new(PAGE_SIZE).unwrap(), gfp);
         if pool.is_err() {
             return null_mut();
         }
         let pool = unsafe { Box::into_raw(pool.unwrap_unchecked()) };
         unsafe {
             for i in 0..NUM_BLOCK_DESC!(*pool) {
-                let a = (*pool).block_lists.push(BlockList::new(), Flags::new(gfp));
+                let a = (*pool).block_lists.push(BlockList::new(), gfp);
                 let t = (*pool).tree.try_create_and_insert(BLOCK_DESC!((*pool), i).slot_size, i,
-                                                           Flags::new(gfp));
+                                                           gfp);
                 if a.is_err() || t.is_err() {
                     let unboxed_zpool = KBox::into_inner(KBox::from_raw(pool));
                     drop(unboxed_zpool.tree);
@@ -468,26 +477,28 @@ impl Zpool for ZblockRust {
         }
         pool as *mut c_void
     }
-    fn Destroy(pool: *mut c_void) {
+    fn destroy(pool: *mut c_void) {
         let zpool = pool as *mut ZblockPool;
         let unboxed_zpool = unsafe { KBox::into_inner(KBox::from_raw(zpool)) };
         drop(unboxed_zpool.tree);
         drop(unboxed_zpool.block_lists);
     }
 
-    fn Malloc(p: *mut c_void, size: usize, gfp: GfpT, handle: *mut usize, nid: c_int) -> c_int {
+    fn malloc(p: *mut c_void, size: usize, gfp: Flags, handle: *mut usize, nid: c_int) -> c_int {
         if size == 0 || size > PAGE_SIZE {
-            return -22; // EINVAL
+            return -(kernel::bindings::EINVAL as i32);
         }
 
-        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
+        let block_type: usize;
+        let the_pool = from_c_pool(p);
         let cursor = the_pool.tree.cursor_lower_bound(&size);
-        if cursor.is_none() { // TODO?
-            return -28; // ENOSPC
+        match cursor {
+            None => return -(kernel::bindings::ENOSPC as i32),
+            Some(binding) => {
+                let (_k, v) = binding.current();
+                block_type = *v;
+            }
         }
-        let binding = cursor.unwrap();
-        let (_k, v) = binding.current();
-        let block_type = *v;
 
         let list = &mut the_pool.block_lists[block_type];
         let result = cache_find_block(list, &the_pool.block_desc[block_type]);
@@ -497,22 +508,18 @@ impl Zpool for ZblockRust {
             return 0;
         }
 
-        let block = alloc_block(the_pool, block_type, gfp, nid, handle);
-        if block.is_null() {
-            return -1; // TODO
-        }
-        return 0;
+        return alloc_block(the_pool, block_type, gfp, nid, handle);
     }
-    fn Free(p: *mut c_void, handle: usize) {
+    fn free(p: *mut c_void, handle: usize) {
         let block: *mut ZblockBlock = handle_to_block!(handle);
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
-        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
-        let the_block: &mut ZblockBlock = unsafe {&mut *(block as *mut ZblockBlock) };
+        let the_pool = from_c_pool(p);
+        let the_block = from_c_block(block);
         let list = &mut the_pool.block_lists[block_type];
         let slots_per_block = BLOCK_DESC!(the_pool, block_type).slots_per_block;
 
-        unsafe { (*block).slot_info.clear(slot) };
+        the_block.slot_info.clear(slot);
         c_spin_lock(&mut list.lock);
         let prev_free_slots = the_block.free_slots.fetch_add(1, Ordering::SeqCst);
         match prev_free_slots {
@@ -520,7 +527,7 @@ impl Zpool for ZblockRust {
                 list.block_count -= 1;
                 let o = unsafe { list.block_list.remove(the_block) };
                 match o {
-                    None => { pr_info!("block already removed 2\n");},
+                    None => { pr_warn!("block already removed\n");},
                     Some(item) => { let _item = item.into_raw(); },
                 }
                 unsafe { vfree_atomic(block as *mut c_void) };
@@ -531,8 +538,8 @@ impl Zpool for ZblockRust {
         c_spin_unlock(&mut list.lock);
     }
 
-    fn ReadBegin(p: *mut c_void, handle: usize, _local_copy: *mut c_void) -> *mut c_void {
-        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
+    fn read_begin(p: *mut c_void, handle: usize, _local_copy: *mut c_void) -> *mut c_void {
+        let the_pool = from_c_pool(p);
         let block: *mut ZblockBlock = handle_to_block!(handle);
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
@@ -542,11 +549,11 @@ impl Zpool for ZblockRust {
         map_addr as *mut c_void
     }
 
-    fn ReadEnd(_pool: *mut c_void, _handle: usize, _handle_mem: *mut c_void) {
+    fn read_end(_pool: *mut c_void, _handle: usize, _handle_mem: *mut c_void) {
     }
 
-    fn Write(p: *mut c_void, handle: usize, handle_mem: *mut c_void, mem_len: usize) {
-        let the_pool: &mut ZblockPool = unsafe {&mut *(p as *mut ZblockPool) };
+    fn write(p: *mut c_void, handle: usize, handle_mem: *mut c_void, mem_len: usize) {
+        let the_pool = from_c_pool(p);
         let block: *mut ZblockBlock = handle_to_block!(handle);
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
@@ -557,9 +564,9 @@ impl Zpool for ZblockRust {
         unsafe { copy_nonoverlapping(handle_mem, map_addr as *mut c_void, mem_len); }
     }
 
-    fn TotalPages(pool: *mut c_void) -> u64 {
+    fn total_pages(p: *mut c_void) -> u64 {
         let mut total_pages: usize = 0;
-        let the_pool: &mut ZblockPool = unsafe {&mut *(pool as *mut ZblockPool) };
+        let the_pool = from_c_pool(p);
 
         for i in 0..NUM_BLOCK_DESC!(the_pool) {
             total_pages += the_pool.block_lists[i].block_count * BLOCK_DESC!(the_pool, i).n_pages;
@@ -570,7 +577,7 @@ impl Zpool for ZblockRust {
 
 impl kernel::Module for ZblockRust {
     fn init(_module: &'static ThisModule) -> Result<Self> {
-        unsafe { let _ = ZPOOL_DRIVER.register(c_str!("zblock_rust"), _module); };
+        unsafe { let _ = ZPOOL_DRIVER.register(RUSTY_BLOCK.get_name(), _module); };
         Ok( RUSTY_BLOCK )
     }
 }
