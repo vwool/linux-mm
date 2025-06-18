@@ -253,18 +253,22 @@ kernel::list::impl_list_item! {
 
 #[pin_data]
 struct BlockList {
+    #[pin]
+    inner: SpinLock<BlockListInner>,
+}
+
+struct BlockListInner {
     block_count: usize,
     block_list: List<ZblockBlock>,
-    #[pin]
-    lock: SpinLock<()>,
 }
 
 impl BlockList {
     fn new() -> impl PinInit<Self, Error> {
         try_pin_init!(Self {
-            block_count: 0,
-            block_list: List::new(),
-            lock <- new_spinlock!((), "BlockList::lock"),
+            inner <- new_spinlock!(BlockListInner {
+                block_count: 0,
+                block_list: List::new(),
+            }, "BlockList::lock"),
         })
     }
 }
@@ -357,26 +361,22 @@ fn atomic_op_if(a: &AtomicU16, op: impl Fn(u16) -> u16, pred: impl Fn(u16) -> bo
     }
 }
 
-fn cache_insert_block(block: *mut ZblockBlock, list: &mut BlockList)
+fn cache_insert_block(block: *mut ZblockBlock, list: &mut BlockListInner)
 {
-    unsafe {
-        list.block_list.push_front(ListArc::from_raw(block));
-    }
+    list.block_list.push_front(unsafe { ListArc::from_raw(block) });
 }
 
-fn cache_append_block(block: *mut ZblockBlock, list: &mut BlockList)
+fn cache_append_block(block: *mut ZblockBlock, list: &mut BlockListInner)
 {
-    unsafe {
-        list.block_list.push_back(ListArc::from_raw(block));
-    }
+    list.block_list.push_back(unsafe { ListArc::from_raw(block) });
 }
 
-fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
+fn cache_find_block(list: &BlockList, block_desc: &BlockDesc) ->
                     Result<(*const ZblockBlock, u16), Error> {
     let slots_per_block = block_desc.slots_per_block;
-    let _guard = list.lock.lock();
+    let mut inner = list.inner.lock();
     loop {
-        let mut cursor = list.block_list.cursor_front();
+        let mut cursor = inner.block_list.cursor_front();
         let peeker = cursor.peek_next();
 
         if peeker.is_none() {
@@ -390,7 +390,7 @@ fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
         match prev_free_slots {
             None => continue,
             Some (1) => {
-                let o = unsafe { list.block_list.remove(the_block) };
+                let o = unsafe { inner.block_list.remove(the_block) };
                 match o {
                     None => { pr_info!("block already removed 1\n");},
                     Some(item) => { let _item = item.into_raw(); },
@@ -405,7 +405,7 @@ fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
     // can't really get here
 }
 
-fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: Flags, nid: i32) -> Result<usize, Error> {
+fn alloc_block(pool: &ZblockPool, block_type: usize, gfp: Flags, nid: i32) -> Result<usize, Error> {
     let block: *mut ZblockBlock;
     unsafe {
         block = vmalloc_node(PAGE_SIZE * pool.block_desc(block_type).n_pages, PAGE_SIZE,
@@ -417,10 +417,10 @@ fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: Flags, nid: i32) -
         let free_slots = pool.block_desc(block_type).slots_per_block - 1;
         (*block).free_slots = AtomicU16::new(free_slots);
     }
-    let list = &mut pool.block_lists[block_type];
-    let _guard = list.lock.lock();
-    cache_insert_block(block, list);
-    list.block_count += 1;
+    let list = &pool.block_lists[block_type];
+    let mut inner = list.inner.lock();
+    cache_insert_block(block, &mut inner);
+    inner.block_count += 1;
 
     Ok(metadata_to_handle!(block, block_type, 0))
 }
@@ -463,10 +463,9 @@ impl Zpool for ZblockRust {
             return Err(EINVAL);
         }
 
-        let the_pool = c_pool_as_mutable(the_pool);
-
         let block_type: usize;
-        let cursor = the_pool.tree.cursor_lower_bound(&size);
+        // TODO: Add non-mut cursor to rbtree.
+        let cursor = c_pool_as_mutable(the_pool).tree.cursor_lower_bound(&size);
         match cursor {
             None => {
                 return Err(ENOSPC);
@@ -477,7 +476,7 @@ impl Zpool for ZblockRust {
             }
         }
 
-        let list = &mut the_pool.block_lists[block_type];
+        let list = &the_pool.block_lists[block_type];
         let result = cache_find_block(list, &the_pool.block_descs[block_type]);
         match result {
             Err(_) => alloc_block(the_pool, block_type, gfp, nid),
@@ -485,7 +484,6 @@ impl Zpool for ZblockRust {
         }
     }
     fn free(the_pool: &ZblockPool, handle: usize) {
-        let the_pool = c_pool_as_mutable(the_pool);
         let block: *mut ZblockBlock = handle_to_block!(handle);
         let block_type = handle_to_block_type!(handle);
         let slot = handle_to_slot!(handle);
@@ -494,20 +492,20 @@ impl Zpool for ZblockRust {
 
         the_block.slot_info.clear(slot);
 
-        let list = &mut the_pool.block_lists[block_type];
-        let _guard = list.lock.lock();
+        let list = &the_pool.block_lists[block_type];
+        let mut inner = list.inner.lock();
         let prev_free_slots = the_block.free_slots.fetch_add(1, Ordering::SeqCst);
         match prev_free_slots {
             val if val == slots_per_block - 1 => {
-                list.block_count -= 1;
-                let o = unsafe { list.block_list.remove(the_block) };
+                inner.block_count -= 1;
+                let o = unsafe { inner.block_list.remove(the_block) };
                 match o {
                     None => { pr_warn!("block already removed\n");},
                     Some(item) => { let _item = item.into_raw(); },
                 }
                 unsafe { vfree_atomic(block as *mut c_void) };
             },
-            0 => { cache_append_block(block, list); },
+            0 => { cache_append_block(block, &mut inner); },
             _ => {},
         }
     }
@@ -540,7 +538,9 @@ impl Zpool for ZblockRust {
         let mut total_pages: usize = 0;
 
         for i in 0..the_pool.num_block_desc() {
-            total_pages += the_pool.block_lists[i].block_count * the_pool.block_desc(i).n_pages;
+            // TODO: Avoid taking the spinlock here.
+            let block_count = the_pool.block_lists[i].inner.lock().block_count;
+            total_pages += block_count * the_pool.block_desc(i).n_pages;
         }
         total_pages as u64
     }
