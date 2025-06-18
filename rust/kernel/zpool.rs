@@ -1,25 +1,26 @@
 use crate::{
     bindings,
-    error::Result,
+    error::{Result,Error},
     kernel::alloc::Flags,
     str::CStr,
     types::Opaque,
 };
 use core::ffi::{c_uchar,c_void,c_int};
+use core::ptr::null_mut;
 use kernel::ThisModule;
 
 /// zpool API
 pub trait Zpool {
     /// pool creation
-    fn create(name: *const c_uchar, gfp: Flags) -> *mut c_void;
+    fn create(name: *const c_uchar, gfp: Flags) -> Result<*mut c_void, Error>;
     /// pool destruction
     fn destroy(pool: *mut c_void);
     /// object allocation
-    fn malloc(pool: *mut c_void, size: usize, gfp: Flags, handle: *mut usize, nid: c_int) -> c_int;
+    fn malloc(pool: *mut c_void, size: usize, gfp: Flags, nid: c_int) -> Result<usize, Error>;
     /// object release
     fn free(pool: *mut c_void, handle: usize);
     /// object read begin
-    fn read_begin(_pool: *mut c_void, handle: usize, _local_copy: *mut c_void) -> *mut c_void;
+    fn read_begin(pool: *mut c_void, handle: usize) -> usize;
     /// object read end
     fn read_end(pool: *mut c_void, handle: usize, handle_mem: *mut c_void);
     /// object write
@@ -76,27 +77,41 @@ impl<T:Zpool> ZpoolDriver<T> {
 
 impl<T: Zpool> Registration for ZpoolDriver<T> {
     extern "C" fn _create(name: *const c_uchar, gfp: u32) -> *mut c_void {
-        T::create(name, Flags::new(gfp))
+        let pool = T::create(name, Flags::new(gfp));
+        match pool {
+            Err(_) => null_mut(),
+            Ok(p) => p
+        }
     }
     extern "C" fn _destroy(pool: *mut c_void) {
+        // SAFETY: pool is guaranteed to be non-null by zpool
         T::destroy(pool)
     }
     extern "C" fn _malloc(pool: *mut c_void, size: usize, gfp: u32, handle: *mut usize, nid: c_int)
                     -> c_int {
-        T::malloc(pool, size, Flags::new(gfp), handle, nid)
+        // SAFETY: pool is guaranteed to be non-null by zpool
+        let result = T::malloc(pool, size, Flags::new(gfp), nid);
+        match result {
+            Err(_) => -(bindings::ENOMEM as i32),
+            Ok(h) => {
+                // SAFETY: handle is guaranteed to be a valid pointer by zpool
+                unsafe { *handle = h };
+                0
+            }
+        }
     }
     extern "C" fn _free(pool: *mut c_void, handle: usize) {
         T::free(pool, handle)
     }
-    extern "C" fn _obj_read_begin(pool: *mut c_void, handle: usize, local_copy: *mut c_void)
+    extern "C" fn _obj_read_begin(pool: *mut c_void, handle: usize, _local_copy: *mut c_void)
                     -> *mut c_void {
-        T::read_begin(pool, handle, local_copy)
+        T::read_begin(pool, handle) as *mut c_void
     }
     extern "C" fn _obj_read_end(pool: *mut c_void, handle: usize, handle_mem: *mut c_void) {
         T::read_end(pool, handle, handle_mem)
     }
     extern "C" fn _obj_write(pool: *mut c_void, handle: usize, handle_mem: *mut c_void, mem_len: usize) {
-        T::write(pool, handle, handle_mem, mem_len)
+        T::write(pool, handle, handle_mem, mem_len);
     }
     extern "C" fn _total_pages(pool: *mut c_void) -> u64 {
         T::total_pages(pool)
