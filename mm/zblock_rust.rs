@@ -7,9 +7,10 @@ use core::mem;
 use core::ptr::{copy_nonoverlapping, null_mut};
 use core::sync::atomic::{AtomicU16,Ordering};
 use kernel::alloc::{Flags,KVec};
-use kernel::bindings::{vmalloc_node,vfree_atomic,spinlock,__spin_lock_init,spin_lock,spin_unlock};
+use kernel::bindings::{vmalloc_node,vfree_atomic};
 use kernel::bindings::__GFP_ZERO;
 use kernel::c_str;
+use kernel::sync::{new_spinlock, SpinLock};
 use kernel::list::{List, ListArc, ListLinks};
 use kernel::prelude::*;
 use kernel::page::{PAGE_SIZE,PAGE_MASK,PAGE_SHIFT};
@@ -250,42 +251,40 @@ kernel::list::impl_list_item! {
     impl ListItem<0> for ZblockBlock { using ListLinks; }
 }
 
+#[pin_data]
 struct BlockList {
     block_count: usize,
-    lock: spinlock,
     block_list: List<ZblockBlock>,
+    #[pin]
+    lock: SpinLock<()>,
 }
 
 impl BlockList {
-    fn declare_spinlock() -> spinlock {
-        let mut lock: spinlock = <_>::default();
-
-        unsafe {
-            __spin_lock_init(&mut lock, "pool_lock".as_ptr() as *const u8, null_mut())
-        }
-        lock
-    }
-
-    fn new() -> Self {
-        Self {
+    fn new() -> impl PinInit<Self, Error> {
+        try_pin_init!(Self {
             block_count: 0,
             block_list: List::new(),
-            lock: Self::declare_spinlock(),
-        }
+            lock <- new_spinlock!((), "BlockList::lock"),
+        })
     }
 }
 
 struct ZblockPool {
     block_descs: KVec<BlockDesc>,
-    block_lists: KVec<BlockList>,
+    block_lists: Pin<KBox<[BlockList]>>,
     tree: RBTree<usize,usize>
 }
 
 impl ZblockPool {
-    fn new(page_size: usize) -> Result<Self> {
+    fn new(page_size: usize, gfp: Flags) -> Result<Self> {
+        let block_descs = DescriptorArray!(page_size)?;
         Ok(Self {
-            block_descs: DescriptorArray!(page_size)?,
-            block_lists: KVec::new(),
+            block_lists: KBox::pin_slice(
+                |_idx| BlockList::new(),
+                block_descs.len(),
+                gfp,
+            )?,
+            block_descs,
             tree: RBTree::new(),
         })
     }
@@ -310,14 +309,6 @@ fn c_pool_as_mutable(pool: &ZblockPool) -> &mut ZblockPool {
 fn from_c_block(block: *mut ZblockBlock) -> &'static mut ZblockBlock {
     let the_block: &mut ZblockBlock = unsafe {&mut *(block as *mut ZblockBlock) };
     the_block
-}
-
-fn c_spin_lock(lock: &mut spinlock) {
-    unsafe { spin_lock(lock); }
-}
-
-fn c_spin_unlock(lock: &mut spinlock) {
-    unsafe { spin_unlock(lock); }
 }
 
 macro_rules! metadata_to_handle {
@@ -383,13 +374,12 @@ fn cache_append_block(block: *mut ZblockBlock, list: &mut BlockList)
 fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
                     Result<(*const ZblockBlock, u16), Error> {
     let slots_per_block = block_desc.slots_per_block;
-    c_spin_lock(&mut list.lock);
+    let _guard = list.lock.lock();
     loop {
         let mut cursor = list.block_list.cursor_front();
         let peeker = cursor.peek_next();
 
         if peeker.is_none() {
-            c_spin_unlock(&mut list.lock);
             return Err(ENOENT);
         }
         let block: *mut ZblockBlock = (*peeker.unwrap()).as_raw() as *mut ZblockBlock;
@@ -410,7 +400,6 @@ fn cache_find_block(list: &mut BlockList, block_desc: &BlockDesc) ->
             }
         slot = the_block.slot_info.find_and_set(slots_per_block);
         pr_debug!("slot {} / {}\n", slot, block_desc.slots_per_block);
-        c_spin_unlock(&mut list.lock);
         return Ok((block,slot));
     }
     // can't really get here
@@ -429,9 +418,8 @@ fn alloc_block(pool: &mut ZblockPool, block_type: usize, gfp: Flags, nid: i32) -
         (*block).free_slots = AtomicU16::new(free_slots);
     }
     let list = &mut pool.block_lists[block_type];
-    c_spin_lock(&mut list.lock);
+    let _guard = list.lock.lock();
     cache_insert_block(block, list);
-    c_spin_unlock(&mut list.lock);
     list.block_count += 1;
 
     Ok(metadata_to_handle!(block, block_type, 0))
@@ -460,12 +448,7 @@ impl Zpool for ZblockRust {
     type Pool = KBox<ZblockPool>;
 
     fn create(_name: *const u8, gfp: Flags) -> Result<KBox<ZblockPool>, Error> {
-        let mut pool = KBox::new(ZblockPool::new(PAGE_SIZE)?, gfp)?;
-        for i in 0..pool.num_block_desc() {
-            pool.block_lists.push(BlockList::new(), gfp)?;
-            let slot_size = pool.block_desc(i).slot_size;
-            pool.tree.try_create_and_insert(slot_size, i, gfp)?;
-        }
+        let pool = KBox::new(ZblockPool::new(PAGE_SIZE, gfp)?, gfp)?;
         pr_info!("Created pool with {} block lists\n", pool.num_block_desc());
         Ok(pool)
     }
@@ -512,7 +495,7 @@ impl Zpool for ZblockRust {
         the_block.slot_info.clear(slot);
 
         let list = &mut the_pool.block_lists[block_type];
-        c_spin_lock(&mut list.lock);
+        let _guard = list.lock.lock();
         let prev_free_slots = the_block.free_slots.fetch_add(1, Ordering::SeqCst);
         match prev_free_slots {
             val if val == slots_per_block - 1 => {
@@ -527,7 +510,6 @@ impl Zpool for ZblockRust {
             0 => { cache_append_block(block, list); },
             _ => {},
         }
-        c_spin_unlock(&mut list.lock);
     }
 
     fn read_begin(the_pool: &ZblockPool, handle: usize) -> usize {
