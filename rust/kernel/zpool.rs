@@ -3,7 +3,7 @@ use crate::{
     error::{Result,Error},
     kernel::alloc::Flags,
     str::CStr,
-    types::Opaque,
+    types::{Opaque, ForeignOwnable},
 };
 use core::ffi::{c_uchar,c_void,c_int};
 use core::ptr::null_mut;
@@ -11,22 +11,24 @@ use kernel::ThisModule;
 
 /// zpool API
 pub trait Zpool {
+    type Pool: ForeignOwnable;
+
     /// pool creation
-    fn create(name: *const c_uchar, gfp: Flags) -> Result<*mut c_void, Error>;
+    fn create(name: *const c_uchar, gfp: Flags) -> Result<Self::Pool, Error>;
     /// pool destruction
-    fn destroy(pool: *mut c_void);
+    fn destroy(pool: Self::Pool);
     /// object allocation
-    fn malloc(pool: *mut c_void, size: usize, gfp: Flags, nid: c_int) -> Result<usize, Error>;
+    fn malloc(pool: <Self::Pool as ForeignOwnable>::Borrowed<'_>, size: usize, gfp: Flags, nid: c_int) -> Result<usize, Error>;
     /// object release
-    fn free(pool: *mut c_void, handle: usize);
+    fn free(pool: <Self::Pool as ForeignOwnable>::Borrowed<'_>, handle: usize);
     /// object read begin
-    fn read_begin(pool: *mut c_void, handle: usize) -> usize;
+    fn read_begin(pool: <Self::Pool as ForeignOwnable>::Borrowed<'_>, handle: usize) -> usize;
     /// object read end
-    fn read_end(pool: *mut c_void, handle: usize, handle_mem: *mut c_void);
+    fn read_end(pool: <Self::Pool as ForeignOwnable>::Borrowed<'_>, handle: usize, handle_mem: *mut c_void);
     /// object write
-    fn write(pool: *mut c_void, handle: usize, handle_mem: *mut c_void, mem_len: usize);
+    fn write(pool: <Self::Pool as ForeignOwnable>::Borrowed<'_>, handle: usize, handle_mem: *mut c_void, mem_len: usize);
     /// get number of pages used
-    fn total_pages(pool: *mut c_void) -> u64;
+    fn total_pages(pool: <Self::Pool as ForeignOwnable>::Borrowed<'_>) -> u64;
 }
 
 /// zpool driver registration trait
@@ -80,15 +82,19 @@ impl<T: Zpool> Registration for ZpoolDriver<T> {
         let pool = T::create(name, Flags::new(gfp));
         match pool {
             Err(_) => null_mut(),
-            Ok(p) => p
+            Ok(p) => T::Pool::into_foreign(p),
         }
     }
     extern "C" fn _destroy(pool: *mut c_void) {
-        // SAFETY: pool is guaranteed to be non-null by zpool
-        T::destroy(pool)
+        // SAFETY: The pointer originates from an `into_foreign` call.
+        T::destroy(unsafe { T::Pool::from_foreign(pool) })
     }
     extern "C" fn _malloc(pool: *mut c_void, size: usize, gfp: u32, handle: *mut usize, nid: c_int)
                     -> c_int {
+        // SAFETY: The pointer originates from an `into_foreign` call. If `pool` is passed to
+        // `from_foreign`, then that happens in `_destroy` which will not be called during this
+        // method.
+        let pool = unsafe { T::Pool::borrow(pool) };
         // SAFETY: pool is guaranteed to be non-null by zpool
         let result = T::malloc(pool, size, Flags::new(gfp), nid);
         match result {
@@ -101,19 +107,39 @@ impl<T: Zpool> Registration for ZpoolDriver<T> {
         }
     }
     extern "C" fn _free(pool: *mut c_void, handle: usize) {
+        // SAFETY: The pointer originates from an `into_foreign` call. If `pool` is passed to
+        // `from_foreign`, then that happens in `_destroy` which will not be called during this
+        // method.
+        let pool = unsafe { T::Pool::borrow(pool) };
         T::free(pool, handle)
     }
     extern "C" fn _obj_read_begin(pool: *mut c_void, handle: usize, _local_copy: *mut c_void)
                     -> *mut c_void {
+        // SAFETY: The pointer originates from an `into_foreign` call. If `pool` is passed to
+        // `from_foreign`, then that happens in `_destroy` which will not be called during this
+        // method.
+        let pool = unsafe { T::Pool::borrow(pool) };
         T::read_begin(pool, handle) as *mut c_void
     }
     extern "C" fn _obj_read_end(pool: *mut c_void, handle: usize, handle_mem: *mut c_void) {
+        // SAFETY: The pointer originates from an `into_foreign` call. If `pool` is passed to
+        // `from_foreign`, then that happens in `_destroy` which will not be called during this
+        // method.
+        let pool = unsafe { T::Pool::borrow(pool) };
         T::read_end(pool, handle, handle_mem)
     }
     extern "C" fn _obj_write(pool: *mut c_void, handle: usize, handle_mem: *mut c_void, mem_len: usize) {
+        // SAFETY: The pointer originates from an `into_foreign` call. If `pool` is passed to
+        // `from_foreign`, then that happens in `_destroy` which will not be called during this
+        // method.
+        let pool = unsafe { T::Pool::borrow(pool) };
         T::write(pool, handle, handle_mem, mem_len);
     }
     extern "C" fn _total_pages(pool: *mut c_void) -> u64 {
+        // SAFETY: The pointer originates from an `into_foreign` call. If `pool` is passed to
+        // `from_foreign`, then that happens in `_destroy` which will not be called during this
+        // method.
+        let pool = unsafe { T::Pool::borrow(pool) };
         T::total_pages(pool)
     }
 
