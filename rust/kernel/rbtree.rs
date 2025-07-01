@@ -415,7 +415,7 @@ where
     /// If the given key exists, the cursor starts there.
     /// Otherwise it starts with the first larger key in sort order.
     /// If there is no larger key, it returns [`None`].
-    pub fn cursor_lower_bound(&mut self, key: &K) -> Option<Cursor<'_, K, V>>
+    pub fn cursor_lower_bound(&self, key: &K) -> Option<Cursor<'_, K, V>>
     where
         K: Ord,
     {
@@ -721,7 +721,7 @@ impl<K, V> Drop for RBTree<K, V> {
 /// # Invariants
 /// - `current` points to a node that is in the same [`RBTree`] as `tree`.
 pub struct Cursor<'a, K, V> {
-    tree: &'a mut RBTree<K, V>,
+    tree: &'a RBTree<K, V>,
     current: NonNull<bindings::rb_node>,
 }
 
@@ -767,7 +767,7 @@ impl<'a, K, V> Cursor<'a, K, V> {
         let node = RBTreeNode { node };
         // SAFETY: The reference to the tree used to create the cursor outlives the cursor, so
         // the tree cannot change. By the tree invariant, all nodes are valid.
-        unsafe { bindings::rb_erase(&mut (*this).links, addr_of_mut!(self.tree.root)) };
+        unsafe { bindings::rb_erase(&mut (*this).links, &self.tree.root as *const bindings::rb_root as *mut  bindings::rb_root) };
 
         let current = match (prev, next) {
             (_, Some(next)) => next,
@@ -803,7 +803,7 @@ impl<'a, K, V> Cursor<'a, K, V> {
             let neighbor = neighbor.as_ptr();
             // SAFETY: The reference to the tree used to create the cursor outlives the cursor, so
             // the tree cannot change. By the tree invariant, all nodes are valid.
-            unsafe { bindings::rb_erase(neighbor, addr_of_mut!(self.tree.root)) };
+            unsafe { bindings::rb_erase(neighbor, &self.tree.root as *const bindings::rb_root as *mut  bindings::rb_root) };
             // SAFETY: By the type invariant of `Self`, all non-null `rb_node` pointers stored in `self`
             // point to the links field of `Node<K, V>` objects.
             let this = unsafe { container_of!(neighbor, Node<K, V>, links) };
