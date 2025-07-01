@@ -310,12 +310,6 @@ impl ZblockPool {
 
 // Helpers
 
-#[allow(invalid_reference_casting)]
-fn c_pool_as_mutable(pool: &ZblockPool) -> &mut ZblockPool {
-    // SAFETY: A temporary measure until incorrect usage of `&mut T` is removed.
-    unsafe { &mut *(pool as *const ZblockPool as *mut ZblockPool) }
-}
-
 fn from_c_block(block: *const ZblockBlock) -> &'static mut ZblockBlock {
     let the_block: &mut ZblockBlock = unsafe {&mut *(block as *mut ZblockBlock) };
     the_block
@@ -435,8 +429,7 @@ impl Zpool for ZblockRust {
         }
 
         let block_type: usize;
-        // TODO: Add non-mut cursor to rbtree.
-        let cursor = c_pool_as_mutable(the_pool).tree.cursor_lower_bound(&size);
+        let cursor = the_pool.tree.cursor_lower_bound(&size);
         match cursor {
             None => {
                 return Err(ENOSPC);
