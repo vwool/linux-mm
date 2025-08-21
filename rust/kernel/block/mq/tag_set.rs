@@ -20,6 +20,12 @@ use core::{
     marker::PhantomData, //
 };
 
+mod flags;
+pub use flags::{
+    Flag,
+    Flags, //
+};
+
 /// A wrapper for the C `struct blk_mq_tag_set`.
 ///
 /// `struct blk_mq_tag_set` contains a `struct list_head` and so must be pinned.
@@ -37,7 +43,12 @@ pub struct TagSet<T: Operations> {
 
 impl<T: Operations> TagSet<T> {
     /// Try to create a new tag set
-    pub fn new(nr_hw_queues: u32, num_tags: u32, num_maps: u32) -> impl PinInit<Self, Error> {
+    pub fn new(
+        nr_hw_queues: u32,
+        num_tags: u32,
+        num_maps: u32,
+        flags: Flags,
+    ) -> impl PinInit<Self, Error> {
         let tag_set: bindings::blk_mq_tag_set = pin_init::zeroed();
         let tag_set: Result<_> = size_of::<RequestDataWrapper<T>>()
             .try_into()
@@ -49,8 +60,8 @@ impl<T: Operations> TagSet<T> {
                     numa_node: bindings::NUMA_NO_NODE,
                     queue_depth: num_tags,
                     cmd_size,
-                    flags: 0,
-                    driver_data: core::ptr::null_mut::<crate::ffi::c_void>(),
+                    flags: flags.into(),
+                    driver_data: core::ptr::null_mut::<c_void>(),
                     nr_maps: num_maps,
                     ..tag_set
                 }
