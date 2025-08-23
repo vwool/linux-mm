@@ -41,6 +41,13 @@ use core::{alloc::Layout, ptr::NonNull};
 pub struct Flags(u32);
 
 impl Flags {
+    /// Create `Flags` from the raw representation.
+    ///
+    /// `f` must be a valid combination of GFP flags.
+    pub(crate) fn from_raw(f: u32) -> Self {
+        Self(f)
+    }
+
     /// Get the raw representation of this flag.
     pub(crate) fn as_raw(self) -> u32 {
         self.0
