@@ -162,6 +162,13 @@ config ZBLOCK
 	  objects per its block. These blocks consist of several virtually
 	  contiguous physical pages (i. e. 1+ pages per block).
 
+config ZVEC
+	tristate "Toy memory-safe compression allocator written in Rust"
+	depends on ZPOOL
+	help
+	  A special purpose allocator for storing compressed pages
+	  implemented in Rust language.
+
 config ZSMALLOC
 	tristate
 	prompt "N:1 compression allocator (zsmalloc)" if (ZSWAP || ZRAM)
