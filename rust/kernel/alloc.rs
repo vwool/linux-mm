@@ -34,6 +34,15 @@ use core::{alloc::Layout, ptr::NonNull};
 pub struct Flags(u32);
 
 impl Flags {
+    /// Create `Flags` from the raw representation.
+    ///
+    pub fn from_raw(f: u32) -> Result<Self> {
+        match f & (!flags::__GFP_ALLOWED_FLAGS) {
+            0 => Ok(Self(f)),
+            _ => Err(EINVAL),
+        }
+    }
+
     /// Get the raw representation of this flag.
     pub(crate) fn as_raw(self) -> u32 {
         self.0
@@ -108,6 +117,27 @@ pub mod flags {
     ///
     /// This is normally or'd with other flags.
     pub const __GFP_NOWARN: Flags = Flags(bindings::__GFP_NOWARN);
+
+    /// Forbids retries if the first allocation has failed.
+    ///
+    /// This is normally or'd with other flags.
+    pub const __GFP_NORETRY: Flags = Flags(bindings::__GFP_NORETRY);
+
+    /// indicates that the page can be moved by page migration during memory compaction or can be
+    /// reclaimed.
+    ///
+    /// This is normally or'd with other flags.
+    pub const __GFP_MOVABLE: Flags = Flags(bindings::__GFP_MOVABLE);
+
+    /// The mask for all the allowed flags.
+    pub(crate) const __GFP_ALLOWED_FLAGS: u32 = bindings::__GFP_ZERO |
+                                                bindings::__GFP_HIGHMEM |
+                                                bindings::__GFP_MOVABLE |
+                                                bindings::__GFP_NORETRY |
+                                                bindings::GFP_ATOMIC |
+                                                bindings::GFP_KERNEL |
+                                                bindings::GFP_KERNEL_ACCOUNT |
+                                                bindings::GFP_NOWAIT;
 }
 
 /// Non Uniform Memory Access (NUMA) node identifier.
