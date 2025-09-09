@@ -476,6 +476,7 @@ Use the following commands to enable zswap::
   # echo 0 > /sys/module/zswap/parameters/enabled
   # echo 50 > /sys/module/zswap/parameters/max_pool_percent
   # echo deflate-iaa > /sys/module/zswap/parameters/compressor
+  # echo zsmalloc > /sys/module/zswap/parameters/zpool
   # echo 1 > /sys/module/zswap/parameters/enabled
   # echo 100 > /proc/sys/vm/swappiness
   # echo never > /sys/kernel/mm/transparent_hugepage/enabled
@@ -624,6 +625,7 @@ the 'fixed' compression mode::
   echo 0 > /sys/module/zswap/parameters/enabled
   echo 50 > /sys/module/zswap/parameters/max_pool_percent
   echo deflate-iaa > /sys/module/zswap/parameters/compressor
+  echo zsmalloc > /sys/module/zswap/parameters/zpool
   echo 1 > /sys/module/zswap/parameters/enabled
 
   echo 100 > /proc/sys/vm/swappiness
