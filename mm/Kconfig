@@ -125,6 +125,10 @@ config ZSWAP_COMPRESSOR_DEFAULT
 config ZALLOC
 	bool
 
+config ZALLOC_RUST
+	bool
+	depends on ZALLOC && !ZSMALLOC
+
 choice
 	prompt "Allocator for zswap"
 	default ZSMALLOC

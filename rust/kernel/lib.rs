@@ -142,6 +142,8 @@ pub mod types;
 pub mod uaccess;
 pub mod workqueue;
 pub mod xarray;
+#[cfg(CONFIG_ZALLOC_RUST)]
+pub mod zalloc;
 
 #[doc(hidden)]
 pub use bindings;
