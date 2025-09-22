@@ -145,6 +145,16 @@ config ZSMALLOC
 	  pages of various compression levels efficiently. It achieves
 	  the highest storage density with the least amount of fragmentation.
 
+config ZBLOCK
+	bool "Fast memory-safe compression allocator with high density"
+	select ZALLOC_RUST
+	help
+	  A special purpose allocator for storing compressed pages
+	  implemented in Rust language with the focus on safety and
+	  performance. It stores integer number of same size compressed
+	  objects per its block. These blocks consist of several virtually
+	  contiguous physical pages (i. e. 1+ pages per block).
+
 endchoice
 
 if ZSMALLOC
