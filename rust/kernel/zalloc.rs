@@ -61,7 +61,7 @@ impl ZallocHandle {
 /// }
 ///
 /// impl ZallocDriver for MyZalloc {
-///     fn malloc(&self, size: usize, _gfp: Flags, _nid: NumaNode) -> Result<ZallocHandle> {
+///     fn malloc(&mut self, size: usize, _gfp: Flags, _nid: NumaNode) -> Result<ZallocHandle> {
 ///         let pow = size.next_power_of_two().trailing_zeros().max(6);
 ///         match pow {
 ///             0 => Err(EINVAL),
@@ -81,7 +81,7 @@ impl ZallocHandle {
 ///         }
 ///     }
 ///
-///     unsafe fn free(&self, handle: ZallocHandle) {
+///     unsafe fn free(&mut self, handle: ZallocHandle) {
 ///         let h = handle.as_raw();
 ///         let n = (h & 0x3F) + 6;
 ///         let uptr = h & !0x3F;
@@ -134,7 +134,7 @@ impl ZallocHandle {
 pub trait ZallocDriver {
     /// Allocate an object of `size` bytes from `pool`, with the allocation flags `gfp` and
     /// preferred NUMA node `nid`. If the allocation is successful, an opaque handle is returned.
-    fn malloc(&self, size: usize, gfp: Flags, nid: NumaNode) -> Result<ZallocHandle>;
+    fn malloc(&mut self, size: usize, gfp: Flags, nid: NumaNode) -> Result<ZallocHandle>;
 
     /// Free an object previously allocated from the `pool`, represented by `handle`.
     ///
@@ -142,7 +142,7 @@ pub trait ZallocDriver {
     ///
     /// - `handle` must be a valid handle previously returned by `malloc`.
     /// - `handle` must not be used any more after the call to `free`.
-    unsafe fn free(&self, handle: ZallocHandle);
+    unsafe fn free(&mut self, handle: ZallocHandle);
 
     /// Make all the necessary preparations for the caller to be able to read from the object
     /// represented by `handle` and return a valid pointer to that object's memory to be read.
@@ -196,9 +196,9 @@ macro_rules! DeclareZallocBackend {
                     Ok(KBox::new(pool, GFP_KERNEL)? as KBox<dyn ZallocDriver>)
                 }
 
-                fn borrow_pool(&self, ptr: *mut c_void) -> &'static dyn ZallocDriver {
+                fn borrow_pool(&self, ptr: *mut c_void) -> &mut dyn ZallocDriver {
                     // SAFETY: `ptr` is a pointer to the pool previously allocated by `create_pool`
-                    unsafe { &*ptr.cast::<$tt>() }
+                    unsafe { &mut *ptr.cast::<$tt>() }
                 }
 
                 fn from_raw(&self, ptr: *mut c_void) -> KBox<dyn ZallocDriver> {
@@ -227,7 +227,7 @@ pub trait ZallocCreator: Sync {
     fn create_pool(&self, name: CString, gfp: Flags) -> Result<KBox<dyn ZallocDriver>>;
 
     /// Borrow a pool.
-    fn borrow_pool(&self, ptr: *mut c_void) -> &'static dyn ZallocDriver;
+    fn borrow_pool(&self, ptr: *mut c_void) -> &mut dyn ZallocDriver;
 
     /// Borrow a pool.
     #[allow(clippy::wrong_self_convention)]

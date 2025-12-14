@@ -5,6 +5,7 @@
 //! C header: [`include/linux/rcupdate.h`](srctree/include/linux/rcupdate.h)
 
 use crate::{bindings, types::NotThreadSafe};
+use core::ptr::NonNull;
 
 /// Evidence that the RCU read side lock is held on the current thread/CPU.
 ///
@@ -49,4 +50,12 @@ impl Drop for Guard {
 #[inline]
 pub fn read_lock() -> Guard {
     Guard::new()
+}
+
+pub unsafe fn kvfree_rcu(ptr: NonNull<u8>) {
+    let rcu: *mut bindings::callback_head = ptr.as_ptr().cast();
+    unsafe {
+        bindings::init_rcu_head(rcu);
+        bindings::kvfree_call_rcu(rcu, ptr.as_ptr().cast());
+    }
 }

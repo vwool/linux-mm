@@ -8,13 +8,13 @@ use core::ptr::{copy_nonoverlapping, NonNull};
 use core::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use kernel::alloc::allocator::Vmalloc;
 use kernel::alloc::{Allocator, Flags, KVec, NumaNode};
-use kernel::error::{Error, Result};
-use kernel::list::{List, ListArc, ListLinks};
+use kernel::error::{/*Error,*/ Result};
+use kernel::list::{ListRcu, ListArc, ListLinks};
 use kernel::page::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE};
 use kernel::prelude::*;
 use kernel::rbtree::*;
 use kernel::str::CString;
-use kernel::sync::{new_spinlock, SpinLock};
+use kernel::sync::{new_spinlock, SpinLock, rcu};
 use kernel::zalloc::*;
 
 const SLOT_BITS: usize = PAGE_SHIFT - 6; // reserve 6 bits for the table
@@ -265,49 +265,43 @@ kernel::list::impl_list_item! {
     impl ListItem<0> for ZblockBlock { using ListLinks { self.links }; }
 }
 
-#[pin_data]
 struct BlockList {
-    #[pin]
-    inner: SpinLock<BlockListInner>,
+    block_list: ListRcu<ZblockBlock>,
     block_count: AtomicUsize,
 }
 
-struct BlockListInner {
-    block_list: List<ZblockBlock>,
-}
-
 impl BlockList {
-    fn new() -> impl PinInit<Self, Error> {
-        try_pin_init!(Self {
-            inner <- new_spinlock!(BlockListInner {
-                block_list: List::new(),
-            }, "BlockList::lock"),
+    fn new() -> Self {
+        Self {
             block_count: AtomicUsize::new(0),
-        })
+            block_list: ListRcu::new(),
+        }
     }
 }
 
 struct ZblockPool {
     name: CString,
     block_descs: KVec<BlockDesc>,
-    block_lists: Pin<KBox<[BlockList]>>,
+    block_lists: KVec<BlockList>,
     tree: RBTree<usize, usize>,
 }
 
 impl ZblockPool {
     fn new(name: CString, gfp: Flags) -> Result<Self> {
         let block_descs = DescriptorArray!(PAGE_SIZE)?;
+        let capacity = block_descs.len();
         let mut pool = Self {
-            block_lists: KBox::pin_slice(|_idx| BlockList::new(), block_descs.len(), gfp)?,
             block_descs,
+            block_lists: KVec::<BlockList>::with_capacity(capacity, gfp)?,
             name,
             tree: RBTree::new(),
         };
-        for i in 0..pool.num_block_desc() {
+        for i in 0..capacity {
+            pool.block_lists.push_within_capacity(BlockList::new())?;
             let slot_size = pool.block_desc(i).slot_size;
             pool.tree.try_create_and_insert(slot_size, i, gfp)?;
         }
-        pr_info!(
+        pr_debug!(
             "Created pool {:?} with {} block lists\n",
             pool.name,
             pool.num_block_desc()
@@ -323,7 +317,8 @@ impl ZblockPool {
         &self.block_descs[i]
     }
 
-    fn alloc_block(&self, block_type: usize, gfp: Flags, nid: NumaNode) -> Result<ZallocHandle> {
+    #[inline(never)]
+    fn alloc_block(&mut self, block_type: usize, gfp: Flags, nid: NumaNode) -> Result<ZallocHandle> {
         // SAFETY:
         // - the align is not 0 and is a power of 2 (PAGE_SIZE)
         // - size does not overflow isize
@@ -335,6 +330,7 @@ impl ZblockPool {
         };
         let ptr = Vmalloc::alloc(layout, gfp, nid)?;
         let block: *mut ZblockBlock = ptr.as_ptr().cast();
+        pr_debug!("alloc: block {:#?}\n for type {}", block, block_type);
 
         // SAFETY:
         // block is guaranteed to be a valid pointer, because Vmalloc::alloc() succeeded if we
@@ -344,18 +340,14 @@ impl ZblockPool {
             (*block).slot_info.set0();
         }
 
-        let list = &self.block_lists[block_type];
-        let mut inner = list.inner.lock();
-
         // SAFETY:
         // * block is a valid pointer to ZblockBlock which implements ListArcSafe
         // * this ZblockBlock doesn't have a ListArc reference
         // * ZblockBlock doesn't track ListArc
-        inner
-            .block_list
-            .push_front(unsafe { ListArc::from_raw(block) });
+        let list = &mut self.block_lists[block_type];
+        list.block_list.push_front(unsafe { ListArc::from_raw(block) });
 
-        list.block_count.fetch_add(1, Ordering::Relaxed);
+        self.block_lists[block_type].block_count.fetch_add(1, Ordering::Relaxed);
         Ok(metadata_to_handle(block, block_type, 0))
     }
 }
@@ -377,24 +369,52 @@ fn handle_to_metadata(handle: ZallocHandle) -> (*mut ZblockBlock, usize, u16) {
     (b, t, s as u16)
 }
 
+#[inline(never)]
 fn cache_find_block(list: &BlockList, block_desc: &BlockDesc) -> Option<(*const ZblockBlock, u16)> {
     let slots_per_block = block_desc.slots_per_block;
-    let mut inner = list.inner.lock();
-    let mut cursor = inner.block_list.cursor_front();
-    if let Some(next) = cursor.peek_next() {
-        let slot = next.slot_info.find_and_set(slots_per_block);
-        if next.free_slots.fetch_sub(1, Ordering::Acquire) == 1 {
-            // no free slots left, remove from the list and return
-            let item = next.remove().into_raw();
-            return Some((item, slot));
+    let guard = rcu::read_lock();
+    let mut iter_count = 3;
+    while let Some(next) = list.block_list.get_first_item() {
+        pr_debug!("next {:#?}\n", next.as_raw());
+        iter_count -= 1;
+        if iter_count == 0 {
+            break;
         }
-        return Some((next.as_raw(), slot));
+        let mut free_slots = next.free_slots.load(Ordering::Acquire);
+        loop {
+            if free_slots == 0 {
+                pr_debug!("no free_slots for {}\n", slots_per_block);
+                if list.block_list.rotate().is_err() {
+                    pr_debug!("rotation failed for {}\n", slots_per_block);
+                    return None;
+                } else {
+                    pr_debug!("rotation for {}\n", slots_per_block);
+                    break;
+                }
+            } else if free_slots == slots_per_block {
+                // will be removed any time now
+                break;
+            }
+            match next.free_slots.compare_exchange(free_slots, free_slots - 1,
+                                                   Ordering::Acquire, Ordering::SeqCst) {
+                Ok(n) => {
+                    pr_debug!("free_slots {}/{}\n", n, slots_per_block);
+                    let slot = next.slot_info.find_and_set(slots_per_block);
+                    return Some((next, slot));
+                },
+                Err(f) => {
+                    pr_info!("free_slots changed, restarting {}/{}\n", f, slots_per_block);
+                    free_slots = f;
+                },
+            }
+        }
     }
+    drop(guard);
     None
 }
 
 impl ZallocDriver for ZblockPool {
-    fn malloc(&self, size: usize, gfp: Flags, nid: NumaNode) -> Result<ZallocHandle> {
+    fn malloc(&mut self, size: usize, gfp: Flags, nid: NumaNode) -> Result<ZallocHandle> {
         if size == 0 || size > PAGE_SIZE {
             return Err(EINVAL);
         }
@@ -412,7 +432,7 @@ impl ZallocDriver for ZblockPool {
         }
     }
 
-    unsafe fn free(&self, handle: ZallocHandle) {
+    unsafe fn free(&mut self, handle: ZallocHandle) {
         let (block, block_type, slot) = handle_to_metadata(handle);
         // SAFETY:
         // * handle is guaranteed to be valid by the framework
@@ -421,36 +441,35 @@ impl ZallocDriver for ZblockPool {
         let the_block: &mut ZblockBlock = unsafe { &mut *block };
 
         let slots_per_block = self.block_desc(block_type).slots_per_block;
-        let list = &self.block_lists[block_type];
-        let mut inner = list.inner.lock();
+        let list = &mut self.block_lists[block_type];
         the_block.slot_info.clear(slot);
         let prev_free_slots = the_block.free_slots.fetch_add(1, Ordering::Acquire);
         match prev_free_slots {
             val if val == slots_per_block - 1 => {
                 list.block_count.fetch_sub(1, Ordering::Relaxed);
                 // SAFETY: the_block can't be in a different list, it is determined by block_type
-                let o = unsafe { inner.block_list.remove(the_block) };
+                let o = unsafe { list.block_list.remove(the_block) };
                 match o {
                     None => {
-                        pr_warn!("block already removed\n");
+                        panic!("block already removed\n");
                     }
                     Some(item) => {
                         let _item = item.into_raw();
                     }
                 }
-                let layout = Layout::new::<ZblockBlock>();
+//                let layout = Layout::new::<ZblockBlock>();
                 // SAFETY: block is guaranteed to be a valid pointer since it's constructed
                 // from handle that we have passed to the frontend before
-                unsafe { Vmalloc::free(NonNull::new_unchecked(block.cast::<u8>()), layout) }
+                pr_debug!("freeing {:#?}\n", block);
+//                unsafe { Vmalloc::free(NonNull::new_unchecked(block.cast::<u8>()), layout) }
+                unsafe { rcu::kvfree_rcu(NonNull::new_unchecked(block.cast::<u8>())) }
             }
             0 => {
                 // SAFETY:
                 // * block is a valid pointer to ZblockBlock which implements ListArcSafe
                 // * this ZblockBlock doesn't have a ListArc reference
                 // * ZblockBlock doesn't track ListArc
-                inner
-                    .block_list
-                    .push_back(unsafe { ListArc::from_raw(block) });
+//                list.block_list.push_back(unsafe { ListArc::from_raw(block) });
             }
             _ => {}
         }

@@ -4,11 +4,13 @@
 
 //! A linked list implementation.
 
+use crate::error::Result;
 use crate::sync::ArcBorrow;
 use crate::types::Opaque;
 use core::iter::{DoubleEndedIterator, FusedIterator};
 use core::marker::PhantomData;
 use core::ptr;
+use core::sync::atomic::{AtomicPtr, Ordering};
 use pin_init::PinInit;
 
 mod impl_list_item_mod;
@@ -265,6 +267,14 @@ pub struct List<T: ?Sized + ListItem<ID>, const ID: u64 = 0> {
     _ty: PhantomData<ListArc<T, ID>>,
 }
 
+/// TODO: Documentation
+//#[pin_data]
+pub struct ListRcu<T: ?Sized + ListItem<ID>, const ID: u64 = 0> {
+    first: AtomicPtr<ListLinksFields>,
+//    #[pin]
+    _ty: PhantomData<ListArc<T, ID>>, // SpinLock<PhantomData<ListArc<T, ID>>>,
+}
+
 // SAFETY: This is a container of `ListArc<T, ID>`, and access to the container allows the same
 // type of access to the `ListArc<T, ID>` elements.
 unsafe impl<T, const ID: u64> Send for List<T, ID>
@@ -282,6 +292,22 @@ where
 {
 }
 
+// SAFETY: This is a container of `ListArc<T, ID>`, and access to the container allows the same
+// type of access to the `ListArc<T, ID>` elements.
+unsafe impl<T, const ID: u64> Send for ListRcu<T, ID>
+where
+    ListArc<T, ID>: Send,
+    T: ?Sized + ListItem<ID>,
+{
+}
+// SAFETY: This is a container of `ListArc<T, ID>`, and access to the container allows the same
+// type of access to the `ListArc<T, ID>` elements.
+unsafe impl<T, const ID: u64> Sync for ListRcu<T, ID>
+where
+    ListArc<T, ID>: Sync,
+    T: ?Sized + ListItem<ID>,
+{
+}
 /// Implemented by types where a [`ListArc<Self>`] can be inserted into a [`List`].
 ///
 /// # Safety
@@ -745,17 +771,248 @@ impl<T: ?Sized + ListItem<ID>, const ID: u64> List<T, ID> {
     }
 }
 
+impl<T: ?Sized + ListItem<ID>, const ID: u64> ListRcu<T, ID> {
+    /// Creates a new empty list.
+//    pub fn new() -> impl PinInit<Self> {
+//        pin_init!(Self {
+//            first: AtomicPtr::new(ptr::null_mut()),
+//            _ty <- new_spinlock!(PhantomData),
+//        })
+//    }
+    pub const fn new() -> Self {
+        Self {
+            first: AtomicPtr::new(ptr::null_mut()),
+            _ty: PhantomData,
+        }
+    }
+
+    /// Appends `item` to the list.
+    ///
+    /// Returns a pointer to the newly inserted element. Never changes `self.first` unless the list
+    /// is empty.
+    ///
+    /// # Safety
+    ///
+    /// * `item` should not be in any list 
+    unsafe fn append(
+        &self,
+        item: ListArc<T, ID>,
+    ) -> *mut ListLinksFields {
+        let raw_item = ListArc::into_raw(item);
+        // SAFETY:
+        // * We just got `raw_item` from a `ListArc`, so it's in an `Arc`.
+        // * Since we have ownership of the `ListArc`, `post_remove` must have been called after
+        //   the most recent call to `prepare_to_insert`, if any.
+        // * We own the `ListArc`.
+        // * Removing items from this list is always done using `remove_internal_inner`, which
+        //   calls `post_remove` before giving up ownership.
+        let list_links = unsafe { T::prepare_to_insert(raw_item) };
+        // SAFETY: We have not yet called `post_remove`, so `list_links` is still valid.
+        let item = unsafe { ListLinks::fields(list_links) };
+
+        // SAFETY: We still own item because it's not inserted yet.
+        // INVARIANT: A linked list with one item should be cyclic.
+        unsafe {
+            (*item).next = item;
+            (*item).prev = item;
+        }
+
+        // Check if the list is empty.
+        match self.first.compare_exchange(ptr::null_mut(), item, Ordering::Release, Ordering::Acquire) {
+            Ok(_) => {},
+            Err(n) => {
+                let mut next = n;
+                // SAFETY: By the type invariant, this pointer is valid or null. We just checked that
+                // it's not null, so it must be valid.
+                loop {
+                    let prev = unsafe { (*next).prev };
+                    // SAFETY: Pointers in a linked list are never dangling, and the caller just gave us
+                    // ownership of the fields on `item`.
+                    // INVARIANT: This correctly inserts `item` between `prev` and `next`.
+                    unsafe {
+                        (*item).next = next;
+                        (*item).prev = prev;
+                    }
+                    // TODO
+                    if self.first.load(Ordering::Acquire) == next {
+                        unsafe {
+                            (*prev).next = item;
+                            (*next).prev = item;
+                        }
+                        break;
+                    } else {
+                        next = self.first.load(Ordering::Acquire);
+                    }
+                }
+            }
+        }
+
+        item
+    }
+
+    /// Add the provided item to the back of the list.
+    pub fn push_back(&mut self, item: ListArc<T, ID>) {
+        // SAFETY:
+        unsafe { self.append(item) };
+    }
+
+    /// Add the provided item to the front of the list.
+    pub fn push_front(&mut self, item: ListArc<T, ID>) {
+        // SAFETY:
+        let new_elem = unsafe { self.append(item) };
+
+        // Another push or remove can't be happening now but we may be racing with rotation.
+        //
+        // INVARIANT: `new_elem` is in the list because we just inserted it.
+        self.first.store(new_elem, Ordering::SeqCst);
+    }
+
+
+    /// TODO: Documentation
+    pub fn get_first_item(&self) -> Option<&T> {
+        let item = self.first.load(Ordering::Acquire);
+
+        if item.is_null() {
+            return None;
+        }
+
+        // SAFETY: TODO
+        let first = unsafe { T::view_value(ListLinks::from_fields(item))};
+        unsafe { Some(&*first) }
+    }
+
+    /// TODO: Documentation
+    pub fn rotate(&self) -> Result {
+        let head = self.first.load(Ordering::Acquire);
+
+        if head.is_null() {
+            return Err(crate::prelude::ENOENT);
+        }
+
+        // SAFETY: if self.first != null, self.first.next is always valid
+        unsafe {
+            match self.first.compare_exchange(head, (*head).next, Ordering::SeqCst, Ordering::Acquire) {
+                Ok(_) => {
+                    let head = self.first.load(Ordering::Acquire);
+                    if head.is_null() || head == (*head).next {
+                        return Err(crate::prelude::ENOENT);
+                    }
+                    Ok(())
+                },
+                Err(_) => Err(crate::prelude::EINVAL),
+            }
+        }
+    }
+ 
+    /// Removes the provided item from this list and returns it.
+    ///
+    /// This returns `None` if the item is not in the list. (Note that by the safety requirements,
+    /// this means that the item is not in any list.)
+    ///
+    /// # Safety
+    ///
+    /// `item` must not be in a different linked list (with the same id).
+    pub unsafe fn remove(&mut self, item: &T) -> Option<ListArc<T, ID>> {
+        // SAFETY: TODO.
+        let mut item = unsafe { ListLinks::fields(T::view_links(item)) };
+        // SAFETY: The user provided a reference, and reference are never dangling.
+        //
+        // As for why this is not a data race, there are two cases:
+        //
+        //  * If `item` is not in any list, then these fields are read-only and null.
+        //  * If `item` is in this list, then we have exclusive access to these fields since we
+        //    have a mutable reference to the list.
+        //
+        // In either case, there's no race.
+        let ListLinksFields { next, prev } = unsafe { *item };
+
+        debug_assert_eq!(next.is_null(), prev.is_null());
+        if !next.is_null() {
+            // This is really a no-op, but this ensures that `item` is a raw pointer that was
+            // obtained without going through a pointer->reference->pointer conversion roundtrip.
+            // This ensures that the list is valid under the more restrictive strict provenance
+            // ruleset.
+            //
+            // SAFETY: We just checked that `next` is not null, and it's not dangling by the
+            // list invariants.
+            unsafe {
+                debug_assert_eq!(item, (*next).prev);
+                item = (*next).prev;
+            }
+
+            // SAFETY: We just checked that `item` is in a list, so the caller guarantees that it
+            // is in this list. The pointers are in the right order.
+            Some(unsafe { self.remove_internal_inner(item, next, prev) })
+        } else {
+            None
+        }
+    }
+
+    /// Removes the provided item from the list.
+    ///
+    /// # Safety
+    ///
+    /// The `item` pointer must point at an item in this list, and we must have `(*item).next ==
+    /// next` and `(*item).prev == prev`.
+    unsafe fn remove_internal_inner(
+        &mut self,
+        item: *mut ListLinksFields,
+        next: *mut ListLinksFields,
+        prev: *mut ListLinksFields,
+    ) -> ListArc<T, ID> {
+        //
+        // INVARIANT: There are three cases:
+        //  * If the list has at least three items, then after removing the item, `prev` and `next`
+        //    will be next to each other.
+        //  * If the list has two items, then the remaining item will point at itself.
+        //  * If the list has one item, then `next == prev == item`, so these writes have no
+        //    effect. The list remains unchanged and `item` is still in the list for now.
+        unsafe {
+            // SAFETY: We have exclusive access to the pointers of items in the list, and the
+            // prev/next pointers are always valid for items in a list.
+            // INVARIANT: There are three cases:
+            //  * `item` was not the first item, then `self.first` should remain unchanged.
+            //  * `item` was the first item and there is another item, then we just update
+            //    `prev->next` to `next`
+            //  * `item` was the only item in the list, then set it to null
+            let n = if item != prev { next } else { ptr::null_mut() };
+            let _ = self.first.compare_exchange(item, n, Ordering::Release, Ordering::Acquire);
+
+            (*next).prev = prev;
+            (*prev).next = next;
+        
+            // INVARIANT: `item` is being removed, so the pointers should be null.
+            (*item).prev = ptr::null_mut();
+            (*item).next = ptr::null_mut();
+        }
+
+        // SAFETY: `item` used to be in the list, so it is dereferenceable by the type invariants
+        // of `List`.
+        let list_links = unsafe { ListLinks::from_fields(item) };
+        // SAFETY: Any pointer in the list originates from a `prepare_to_insert` call.
+        let raw_item = unsafe { T::post_remove(list_links) };
+        // SAFETY: The above call to `post_remove` guarantees that we can recreate the `ListArc`.
+        unsafe { ListArc::from_raw(raw_item) }
+    }
+}
+
 impl<T: ?Sized + ListItem<ID>, const ID: u64> Default for List<T, ID> {
     fn default() -> Self {
         List::new()
     }
 }
 
-impl<T: ?Sized + ListItem<ID>, const ID: u64> Drop for List<T, ID> {
+impl<T:?Sized + ListItem<ID>, const ID: u64> Drop for List<T, ID> {
     fn drop(&mut self) {
         while let Some(item) = self.pop_front() {
             drop(item);
         }
+    }
+}
+
+impl<T: ?Sized + ListItem<ID>, const ID: u64> Default for ListRcu<T, ID> {
+    fn default() -> Self {
+        ListRcu::new()
     }
 }
 
