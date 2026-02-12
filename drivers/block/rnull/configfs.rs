@@ -30,7 +30,8 @@ use macros::{
     configfs_simple_bool_field,
     configfs_simple_field,
     show_field,
-    store_number_with_power_check, //
+    store_number_with_power_check,
+    store_with_power_check, //
 };
 
 mod macros;
@@ -59,7 +60,7 @@ impl AttributeOperations<0> for Config {
         let mut writer = kernel::str::Formatter::new(page);
         writer.write_str(
             "blocksize,size,rotational,irqmode,power,completion_nsec,memory_backed,\
-             submit_queues\n",
+             submit_queues,use_per_node_hctx\n",
         )?;
         Ok(writer.bytes_written())
     }
@@ -86,6 +87,7 @@ impl configfs::GroupOperations for Config {
                 completion_nsec: 5,
                 memory_backed: 6,
                 submit_queues: 7,
+                use_per_node_hctx: 8,
             ],
         };
 
@@ -265,3 +267,21 @@ impl configfs::AttributeOperations<7> for DeviceConfig {
         Ok(())
     }
 }
+
+configfs_attribute!(DeviceConfig, 8,
+    show: |this, page| show_field(
+        this.data.lock().submit_queues == kernel::numa::num_online_nodes(), page
+    ),
+    store: |this, page| store_with_power_check(this, page, |data, page| {
+        let value = core::str::from_utf8(page)?
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| kernel::error::code::EINVAL)?
+            != 0;
+
+        if value {
+            data.submit_queues = kernel::numa::num_online_nodes();
+        }
+        Ok(())
+    })
+);
