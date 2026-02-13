@@ -223,6 +223,13 @@ impl NullBlkDevice {
             kernel::numa::NumaNode::new(home_node)?
         };
 
+        let capacity_sectors = capacity_mib << (20 - block::SECTOR_SHIFT);
+
+        // Prevent overflow in usize/u64 casts
+        if usize::BITS == 32 && capacity_sectors > u32::MAX.into() {
+            return Err(code::EINVAL);
+        }
+
         let tagset = Arc::pin_init(
             TagSet::new(submit_queues, 256, 1, numa_node, flags),
             GFP_KERNEL,
@@ -234,13 +241,13 @@ impl NullBlkDevice {
                 irq_mode,
                 completion_time,
                 memory_backed,
-                block_size: block_size as usize,
+                block_size: block_size.into(),
             }),
             GFP_KERNEL,
         )?;
 
         let mut builder = gen_disk::GenDiskBuilder::new()
-            .capacity_sectors(capacity_mib << (20 - block::SECTOR_SHIFT))
+            .capacity_sectors(capacity_sectors)
             .logical_block_size(block_size)?
             .physical_block_size(block_size)?
             .rotational(rotational);
@@ -255,12 +262,13 @@ impl NullBlkDevice {
     }
 
     #[inline(always)]
-    fn write(tree: &XArray<TreeNode>, mut sector: usize, mut segment: Segment<'_>) -> Result {
+    fn write(tree: &XArray<TreeNode>, mut sector: u64, mut segment: Segment<'_>) -> Result {
         while !segment.at_end() {
             let page = NullBlockPage::new()?;
             let mut tree = tree.lock();
 
-            let page_idx = sector >> block::PAGE_SECTORS_SHIFT;
+            // CAST: Device size limited during setup to (2^32)-1 on 32 bit systems.
+            let page_idx = (sector >> block::PAGE_SECTORS_SHIFT) as usize;
 
             let page = if let Some(page) = tree.get_mut(page_idx) {
                 page
@@ -270,44 +278,51 @@ impl NullBlkDevice {
             };
 
             page.set_occupied(sector);
-            let page_offset = (sector & block::PAGE_SECTOR_MASK as usize) << block::SECTOR_SHIFT;
+
+            // CAST: Page offset always fits in 32 bits.
+            let page_offset =
+                ((sector & u64::from(block::PAGE_SECTOR_MASK)) << block::SECTOR_SHIFT) as usize;
+
             let dst = &mut page.page.as_pin_mut().as_mut_slice()[page_offset..];
-            sector += segment.read(dst) >> block::SECTOR_SHIFT;
+
+            // CAST: Casting from `usize` to `u64` never overflows.
+            sector += segment.read(dst) as u64 >> block::SECTOR_SHIFT;
         }
         Ok(())
     }
 
     #[inline(always)]
-    fn read(tree: &XArray<TreeNode>, mut sector: usize, mut segment: Segment<'_>) -> Result {
+    fn read(tree: &XArray<TreeNode>, mut sector: u64, mut segment: Segment<'_>) -> Result {
         let tree = tree.lock();
 
         while !segment.at_end() {
-            let idx = sector >> block::PAGE_SECTORS_SHIFT;
+            // CAST: Device size limited during setup to (2^32)-1 on 32 bit systems.
+            let page_idx = (sector >> block::PAGE_SECTORS_SHIFT) as usize;
 
-            if let Some(page) = tree.get(idx) {
+            if let Some(page) = tree.get(page_idx) {
+                // CAST: Page offset always fits in 32 bits.
                 let page_offset =
-                    (sector & block::PAGE_SECTOR_MASK as usize) << block::SECTOR_SHIFT;
-                sector +=
-                    segment.write(&page.page.as_slice()[page_offset..]) >> block::SECTOR_SHIFT;
+                    ((sector & u64::from(block::PAGE_SECTOR_MASK)) << block::SECTOR_SHIFT) as usize;
+
+                // CAST: Casting from `usize` to `u64` never overflows.
+                sector += segment.write(&page.page.as_slice()[page_offset..]) as u64
+                    >> block::SECTOR_SHIFT;
             } else {
-                sector += segment.zero_page() >> block::SECTOR_SHIFT;
+                // CAST: Casting from `usize` to `u64` never overflows.
+                sector += segment.zero_page() as u64 >> block::SECTOR_SHIFT;
             }
         }
 
         Ok(())
     }
 
-    fn discard(
-        tree: &XArray<TreeNode>,
-        mut sector: usize,
-        sectors: usize,
-        block_size: usize,
-    ) -> Result {
+    fn discard(tree: &XArray<TreeNode>, mut sector: u64, sectors: u64, block_size: u64) -> Result {
         let mut remaining_bytes = sectors << SECTOR_SHIFT;
         let mut tree = tree.lock();
 
         while remaining_bytes > 0 {
-            let page_idx = sector >> block::PAGE_SECTORS_SHIFT;
+            // CAST: Device size limited during setup to (2^32)-1 on 32 bit systems.
+            let page_idx = (sector >> block::PAGE_SECTORS_SHIFT) as usize;
             let mut remove = false;
             if let Some(page) = tree.get_mut(page_idx) {
                 page.set_free(sector);
@@ -332,7 +347,7 @@ impl NullBlkDevice {
     fn transfer(
         command: bindings::req_op,
         tree: &XArray<TreeNode>,
-        sector: usize,
+        sector: u64,
         segment: Segment<'_>,
     ) -> Result {
         match command {
@@ -362,13 +377,13 @@ impl NullBlockPage {
         )?)
     }
 
-    fn set_occupied(&mut self, sector: usize) {
-        let idx = sector & PAGE_SECTOR_MASK as usize;
+    fn set_occupied(&mut self, sector: u64) {
+        let idx = sector & u64::from(PAGE_SECTOR_MASK);
         self.status |= 1 << idx;
     }
 
-    fn set_free(&mut self, sector: usize) {
-        let idx = sector & PAGE_SECTOR_MASK as usize;
+    fn set_free(&mut self, sector: u64) {
+        let idx = sector & u64::from(PAGE_SECTOR_MASK);
         self.status &= !(1 << idx);
     }
 
@@ -386,7 +401,7 @@ struct QueueData {
     irq_mode: IRQMode,
     completion_time: Delta,
     memory_backed: bool,
-    block_size: usize,
+    block_size: u64,
 }
 
 #[pin_data]
@@ -438,14 +453,14 @@ impl Operations for NullBlkDevice {
                 let mut sector = rq.sector();
 
                 if command == bindings::req_op_REQ_OP_DISCARD {
-                    Self::discard(tree, sector, rq.sectors(), queue_data.block_size)?;
+                    Self::discard(tree, sector, rq.sectors().into(), queue_data.block_size)?;
                 } else {
                     for bio in rq.bio_iter_mut() {
                         let segment_iter = bio.segment_iter();
                         for segment in segment_iter {
                             let length = segment.len();
                             Self::transfer(command, tree, sector, segment)?;
-                            sector += length as usize >> block::SECTOR_SHIFT;
+                            sector += u64::from(length) >> block::SECTOR_SHIFT;
                         }
                     }
                 }
