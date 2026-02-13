@@ -286,7 +286,7 @@ impl<T: Operations> GenDiskBuilder<T> {
         // `__blk_mq_alloc_disk` above.
         let disk: Arc<_> = disk
             .write(GenDisk {
-                _tagset: tagset,
+                tag_set: tagset,
                 gendisk,
                 backref,
             })
@@ -323,7 +323,7 @@ impl<T: Operations> GenDiskBuilder<T> {
 
             // SAFETY: `disk` is uniquely owned and its drop is suppressed, so the field is valid
             // and nothing will access or drop it after this point.
-            drop(unsafe { core::ptr::read(&disk._tagset) });
+            drop(unsafe { core::ptr::read(&disk.tag_set) });
             // SAFETY: As above.
             drop(unsafe { core::ptr::read(&disk.backref) });
             return Err(error);
@@ -374,7 +374,7 @@ impl<T: Operations> GenDiskBuilder<T> {
 ///    `bindings::device_add_disk`.
 ///  - `self.gendisk.queue.queuedata` is initialized by a call to `ForeignOwnable::into_foreign`.
 pub struct GenDisk<T: Operations> {
-    _tagset: Arc<TagSet<T>>,
+    tag_set: Arc<TagSet<T>>,
     gendisk: *mut bindings::gendisk,
     backref: Arc<Revocable<GenDiskRef<T>>>,
 }
@@ -395,6 +395,11 @@ impl<T: Operations> GenDisk<T> {
     pub fn queue_data(&self) -> <T::QueueData as ForeignOwnable>::Borrowed<'_> {
         // SAFETY: By type invariant, self is a valid gendisk.
         unsafe { T::QueueData::borrow((*(*self.gendisk).queue).queuedata) }
+    }
+
+    /// Get a reference to the `TagSet` used by this `GenDisk`.
+    pub fn tag_set(&self) -> &Arc<TagSet<T>> {
+        &self.tag_set
     }
 }
 
