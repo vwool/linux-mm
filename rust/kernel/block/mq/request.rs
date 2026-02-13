@@ -24,6 +24,7 @@ use crate::{
         HrTimerPointer, //
     },
     types::{
+        ForeignOwnable,
         Opaque,
         Ownable,
         OwnableIntoShared,
@@ -34,6 +35,7 @@ use crate::{
 use core::{
     ffi::c_void,
     marker::PhantomData,
+    ops::Deref,
     pin::Pin,
     ptr::NonNull, //
 };
@@ -42,6 +44,128 @@ use crate::block::bio::{
     Bio,
     BioIterator, //
 };
+
+/// A [`Request`] that a driver has not yet begun to process.
+///
+/// A driver can convert an `IdleRequest` to a [`Request`] by calling [`IdleRequest::start`].
+///
+/// # Invariants
+///
+/// - This request has not been started yet.
+/// - While an [`Owned<IdleRequest<T>>`] exists for a request, the refcount of the request is 0, no
+///   [`Owned<Request<T>>`] and no [`ARef<Request<T>>`] exist for the request, and no Rust reference
+///   to the request exists other than the ones borrowed from the [`Owned<IdleRequest<T>>`]. Thus,
+///   access through the [`Owned<IdleRequest<T>>`] is not aliased by other Rust references.
+#[repr(transparent)]
+pub struct IdleRequest<T>(RequestInner<T>);
+
+impl<T: Operations> IdleRequest<T> {
+    /// Mark the request as processing.
+    ///
+    /// This converts the [`IdleRequest`] into a [`Request`].
+    pub fn start(self: Owned<Self>) -> Owned<Request<T>> {
+        // Give up the `Owned<IdleRequest<T>>` before creating an `Owned<Request<T>>`, so that at
+        // most one `Owned` exists for the request.
+        let ptr = Owned::into_raw(self).as_ptr().cast::<bindings::request>();
+
+        // SAFETY: `IdleRequest` is transparent over `struct request`, so `ptr` points to the
+        // request that was owned by `self`. By the type invariants of `IdleRequest`, the request
+        // satisfies the invariants of `Request`, the refcount is 0, and no `Owned` or `ARef` exists
+        // for the request, as we consumed `self` above.
+        let mut request = unsafe { Request::from_raw(ptr) };
+
+        debug_assert!(
+            request
+                .wrapper_ref()
+                .refcount()
+                .as_atomic()
+                .load(ordering::Acquire)
+                == 0
+        );
+
+        // SAFETY: We have exclusive access and the refcount is 0. By type invariant `request` was
+        // not started yet.
+        unsafe { request.start_unchecked() };
+
+        request
+    }
+
+    /// Create a [`Self`] from a raw request pointer.
+    ///
+    /// # Safety
+    ///
+    /// - The request pointed to by `ptr` must satisfy the invariants of both [`Request`] and
+    ///   [`Self`].
+    /// - The refcount of the request pointed to by `ptr` must be 0.
+    /// - The request must be owned by the caller, and that ownership is transferred to the returned
+    ///   [`Owned<Self>`]. In particular, no [`Owned`], [`ARef`] or other Rust reference may exist
+    ///   for the request.
+    pub(crate) unsafe fn from_raw(ptr: *mut bindings::request) -> Owned<Self> {
+        // INVARIANT: By the function safety requirements, the refcount is 0 and no other `Owned`,
+        // `ARef` or Rust reference exists for the request.
+        // SAFETY:
+        // - By the function safety requirements, `ptr` points to a valid `IdleRequest`, and it
+        //   stays valid until the request is handed back to the block layer.
+        // - By the function safety requirements, no other `Owned` exists for the request.
+        // - A `struct request` is allocated in the tag set and is never moved.
+        // - `IdleRequest` allows no other Rust references to exist together with the `Owned`, and
+        //   none exist by the function safety requirements. The C block layer only accesses the
+        //   request through the `Opaque` wrapper. Thus, it is sound to hand out `&Self` and
+        //   `Pin<&mut Self>`.
+        // - Requests have no logic that relies on them staying on a given thread.
+        unsafe { Owned::from_raw(NonNull::<Self>::new_unchecked(ptr.cast())) }
+    }
+}
+
+impl<T: Operations> Ownable for IdleRequest<T> {
+    // Giving up the `Owned` role for an `IdleRequest` requires no action. The request is left
+    // with refcount 0, which is a valid state for a request that is owned by the C block layer.
+    unsafe fn release(_this: NonNull<Self>) {}
+}
+
+impl<T: Operations> Deref for IdleRequest<T> {
+    type Target = RequestInner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct RequestInner<T>(Opaque<bindings::request>, PhantomData<T>);
+
+impl<T: Operations> RequestInner<T> {
+    /// Get the command identifier for the request
+    pub fn command(&self) -> u32 {
+        // SAFETY: By C API contract and type invariant, `cmd_flags` is valid for read
+        unsafe { (*self.0.get()).cmd_flags & ((1 << bindings::REQ_OP_BITS) - 1) }
+    }
+
+    /// Get the target sector for the request.
+    #[inline(always)]
+    pub fn sector(&self) -> u64 {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { (*self.0.get()).__sector }
+    }
+
+    /// Get the size of the request in number of sectors.
+    #[inline(always)]
+    pub fn sectors(&self) -> u32 {
+        self.bytes() >> crate::block::SECTOR_SHIFT
+    }
+
+    /// Get the size of the request in bytes.
+    #[inline(always)]
+    pub fn bytes(&self) -> u32 {
+        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
+        unsafe { (*self.0.get()).__data_len }
+    }
+
+    /// Borrow the queue data from the request queue associated with this request.
+    pub fn queue_data(&self) -> <T::QueueData as ForeignOwnable>::Borrowed<'_> {
+        // SAFETY: By type invariants of `Request`, `self.0` is a valid request.
+        unsafe { T::QueueData::borrow((*(*self.0.get()).q).queuedata) }
+    }
+}
 
 /// A wrapper around a blk-mq [`struct request`]. This represents an IO request.
 ///
@@ -102,9 +226,45 @@ use crate::block::bio::{
 /// [`struct request`]: srctree/include/linux/blk-mq.h
 ///
 #[repr(transparent)]
-pub struct Request<T>(Opaque<bindings::request>, PhantomData<T>);
+pub struct Request<T>(RequestInner<T>);
+
+impl<T: Operations> Deref for Request<T> {
+    type Target = RequestInner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 impl<T: Operations> Request<T> {
+    /// Create a `Owned<Request>` from a request pointer.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must satisfy invariants of `Request`.
+    /// - The refcount of the request pointed to by `ptr` must be 0.
+    /// - The request must be owned by the caller, and that ownership is transferred to the returned
+    ///   [`Owned<Self>`]. In particular, no [`Owned`], [`ARef`] or other Rust reference may exist
+    ///   for the request.
+    pub(crate) unsafe fn from_raw(ptr: *mut bindings::request) -> Owned<Self> {
+        // INVARIANT: By the function safety requirements, the refcount is 0 and no other `Owned`,
+        // `ARef` or Rust reference exists for the request.
+        // SAFETY:
+        // - By the function safety requirements, `ptr` points to a valid `Request`, and it stays
+        //   valid until the request is handed back to the block layer.
+        // - By the function safety requirements, no other `Owned` exists for the request.
+        // - A `struct request` is allocated in the tag set and is never moved.
+        // - `Request` allows no other Rust references to exist together with the `Owned`, and none
+        //   exist by the function safety requirements. None can be created while the refcount is
+        //   0: `TagSet::tag_to_rq` waits for a non-zero refcount, and the request timer callback
+        //   only runs while a `RequestTimerHandle` holds an `ARef`, which implies a non-zero
+        //   refcount. The C block layer only accesses the request through the `Opaque` wrapper.
+        //   Thus, it is sound to hand out `&Self` and `Pin<&mut Self>`.
+        // - `Request` is `Send` and `Sync`, and has no logic that relies on it staying on a given
+        //   thread.
+        unsafe { Owned::from_raw(NonNull::<Self>::new_unchecked(ptr.cast())) }
+    }
+
     /// Create an [`ARef<Request>`] from a [`struct request`] pointer.
     ///
     /// # Safety
@@ -126,7 +286,7 @@ impl<T: Operations> Request<T> {
     pub fn command(&self) -> u32 {
         use core::ops::BitAnd;
         // SAFETY: By C API contract and type invariant, `cmd_flags` is valid for read
-        unsafe { (*self.0.get()).cmd_flags }.bitand((1u32 << bindings::REQ_OP_BITS) - 1)
+        unsafe { (*self.0 .0.get()).cmd_flags }.bitand((1u32 << bindings::REQ_OP_BITS) - 1)
     }
 
     /// Complete the request by scheduling `Operations::complete` for
@@ -151,7 +311,7 @@ impl<T: Operations> Request<T> {
     pub fn bio(&self) -> Option<&Bio> {
         // SAFETY: By type invariant of `Self`, `self.0` is valid and the deref
         // is safe.
-        let ptr = unsafe { (*self.0.get()).bio };
+        let ptr = unsafe { (*self.0 .0.get()).bio };
         // SAFETY: By C API contract, if `bio` is not null it will have a
         // positive refcount at least for the duration of the lifetime of
         // `&self`.
@@ -163,7 +323,7 @@ impl<T: Operations> Request<T> {
     pub fn bio_mut(self: Pin<&mut Self>) -> Option<Pin<&mut Bio>> {
         // SAFETY: By type invariant of `Self`, `self.0` is valid and the deref
         // is safe.
-        let ptr = unsafe { (*self.0.get()).bio };
+        let ptr = unsafe { (*self.0 .0.get()).bio };
         // SAFETY: By C API contract, if `bio` is not null it will have a
         // positive refcount at least for the duration of the lifetime of
         // `&mut self`.
@@ -177,23 +337,9 @@ impl<T: Operations> Request<T> {
         // `NonNull::new` will return `None` if the pointer is null.
         BioIterator {
             // SAFETY: By type invariant `self.0` is a valid `struct request`.
-            bio: NonNull::new(unsafe { (*self.0.get()).bio.cast() }),
+            bio: NonNull::new(unsafe { (*self.0 .0.get()).bio.cast() }),
             _p: PhantomData,
         }
-    }
-
-    /// Get the target sector for the request.
-    #[inline(always)]
-    pub fn sector(&self) -> u64 {
-        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
-        unsafe { (*self.0.get()).__sector }
-    }
-
-    /// Get the size of the request in number of sectors.
-    #[inline(always)]
-    pub fn sectors(&self) -> u32 {
-        // SAFETY: By type invariant of `Self`, `self.0` is valid and live.
-        (unsafe { (*self.0.get()).__data_len }) >> crate::block::SECTOR_SHIFT
     }
 
     /// Return a pointer to the [`RequestDataWrapper`] stored in the private area
@@ -334,10 +480,10 @@ impl<T: Operations> Owned<Request<T>> {
     /// `self.wrapper_ref().refcount() == 0`.
     ///
     /// This can only be called once in the request life cycle.
-    pub(crate) unsafe fn start_unchecked(&mut self) {
+    pub unsafe fn start_unchecked(&mut self) {
         // SAFETY: By type invariant, `self.0` is a valid `struct request` and
         // we have exclusive access.
-        unsafe { bindings::blk_mq_start_request(self.0.get()) };
+        unsafe { bindings::blk_mq_start_request(self.0 .0.get()) };
     }
 
     /// Notify the block layer that the request has been completed without errors.
@@ -347,7 +493,7 @@ impl<T: Operations> Owned<Request<T>> {
 
     /// Notify the block layer that the request has been completed.
     pub fn end(self, status: u8) {
-        let request_ptr = self.0.get().cast();
+        let request_ptr = self.0 .0.get().cast();
         core::mem::forget(self);
         // SAFETY: By type invariant, `this.0` was a valid `struct request`. By
         // the type invariants of `Request`, there are no `ARef`s pointing to
