@@ -24,6 +24,7 @@ use kernel::{
             BadBlocks, //
         },
         bio::Segment,
+        error::BlkResult,
         mq::{
             self,
             gen_disk::{
@@ -600,7 +601,7 @@ impl Operations for NullBlkDevice {
         this: Pin<&Self>,
         rq: Owned<mq::IdleRequest<Self>>,
         _is_last: bool,
-    ) -> Result {
+    ) -> BlkResult {
         let mut rq = rq.start();
         let mut sectors = rq.sectors();
 
