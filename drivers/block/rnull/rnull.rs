@@ -788,6 +788,7 @@ impl Operations for NullBlkDevice {
         this: ArcBorrow<'_, Self>,
         rq: Owned<mq::IdleRequest<Self>>,
         _is_last: bool,
+        _is_poll: bool,
     ) -> BlkResult {
         if this.bandwidth_limit != 0 {
             // Hold the lock across the query and the start operation. The
