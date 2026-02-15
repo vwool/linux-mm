@@ -115,9 +115,20 @@ impl<T: Operations> PinnedDrop for TagSet<T> {
     }
 }
 
-// SAFETY: It is safe to transfer ownership of `TagSet` between threads.
-unsafe impl<T: Operations> Send for TagSet<T> {}
+// SAFETY: It is safe to share references to `TagSet` across thread boundaries as long as
+// `TagSetData` is `Sync`.
+unsafe impl<T> Sync for TagSet<T>
+where
+    T: Operations,
+    T::TagSetData: Sync,
+{
+}
 
-// SAFETY: It is safe to share `&TagSet` across threads. `TagSet` exposes no
-// `&self` methods that mutate the contained `blk_mq_tag_set`.
-unsafe impl<T: Operations> Sync for TagSet<T> {}
+// SAFETY: It is safe to transfer ownership of `TagSet` across thread boundaries if the associated
+// private data is `Send` (it will be dropped with the `TagSet`).
+unsafe impl<T> Send for TagSet<T>
+where
+    T: Operations,
+    T::TagSetData: Send,
+{
+}
