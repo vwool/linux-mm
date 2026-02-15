@@ -33,20 +33,24 @@ use crate::{
         ScopeGuard, //
     }, //
 };
-use core::ptr::NonNull;
+use core::{
+    marker::PhantomData,
+    ptr::NonNull, //
+};
 
 /// A builder for [`GenDisk`].
 ///
 /// Use this struct to configure and add new [`GenDisk`] to the VFS.
-pub struct GenDiskBuilder {
+pub struct GenDiskBuilder<T> {
     rotational: bool,
     logical_block_size: u32,
     physical_block_size: u32,
     capacity_sectors: u64,
     max_hw_discard_sectors: u32,
+    _p: PhantomData<T>,
 }
 
-impl Default for GenDiskBuilder {
+impl<T> Default for GenDiskBuilder<T> {
     fn default() -> Self {
         Self {
             rotational: false,
@@ -54,11 +58,12 @@ impl Default for GenDiskBuilder {
             physical_block_size: bindings::PAGE_SIZE as u32,
             capacity_sectors: 0,
             max_hw_discard_sectors: 0,
+            _p: PhantomData,
         }
     }
 }
 
-impl GenDiskBuilder {
+impl<T: Operations> GenDiskBuilder<T> {
     /// Create a new instance.
     pub fn new() -> Self {
         Self::default()
@@ -125,7 +130,7 @@ impl GenDiskBuilder {
     }
 
     /// Build a new `GenDisk` and add it to the VFS.
-    pub fn build<T: Operations>(
+    pub fn build(
         self,
         name: fmt::Arguments<'_>,
         tagset: Arc<TagSet<T>>,
@@ -158,7 +163,7 @@ impl GenDiskBuilder {
 
         // SAFETY: `gendisk` is a valid pointer. We have exclusive access,
         // since the disk is not added to the VFS yet.
-        unsafe { (*gendisk).fops = &GenDisk::<T>::VTABLE };
+        unsafe { (*gendisk).fops = Self::build_vtable() };
 
         let cleanup_failure = ScopeGuard::new_with_data((gendisk, data), |(gendisk, data)| {
             // SAFETY: `gendisk` came from `__blk_mq_alloc_disk()` above and
@@ -224,6 +229,32 @@ impl GenDiskBuilder {
 
         Ok(disk.into())
     }
+
+    const VTABLE: bindings::block_device_operations = bindings::block_device_operations {
+        submit_bio: None,
+        open: None,
+        release: None,
+        ioctl: None,
+        compat_ioctl: None,
+        check_events: None,
+        unlock_native_capacity: None,
+        getgeo: None,
+        set_read_only: None,
+        swap_slot_free_notify: None,
+        report_zones: None,
+        devnode: None,
+        alternative_gpt_sector: None,
+        get_unique_id: None,
+        init_dma_buf_io_ctx: None,
+        owner: crate::module::this_module::<T::OwnerModule>().as_ptr(),
+        pr_ops: core::ptr::null_mut(),
+        free_disk: None,
+        poll_bio: None,
+    };
+
+    pub(crate) const fn build_vtable() -> &'static bindings::block_device_operations {
+        &Self::VTABLE
+    }
 }
 
 /// A generic block device.
@@ -257,13 +288,6 @@ impl<T: Operations> GenDisk<T> {
         // SAFETY: By type invariant, self is a valid gendisk.
         unsafe { T::QueueData::borrow((*(*self.gendisk).queue).queuedata) }
     }
-}
-
-impl<T: Operations> GenDisk<T> {
-    const VTABLE: bindings::block_device_operations = bindings::block_device_operations {
-        owner: crate::module::this_module::<T::OwnerModule>().as_ptr(),
-        ..pin_init::zeroed()
-    };
 }
 
 // SAFETY: `GenDisk` is an owned pointer to a `struct gendisk` and an `Arc` to a
