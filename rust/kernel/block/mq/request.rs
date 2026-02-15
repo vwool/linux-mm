@@ -125,6 +125,18 @@ impl<T: Operations> IdleRequest<T> {
         // - Requests have no logic that relies on them staying on a given thread.
         unsafe { Owned::from_raw(NonNull::<Self>::new_unchecked(ptr.cast())) }
     }
+
+    /// Requeue this request at the block layer.
+    ///
+    /// If `kick_requeue_list` is true, this method will schedule processing of
+    /// the requeue list on a workqueue.
+    pub fn requeue(self: Owned<Self>, kick_requeue_list: bool) {
+        let ptr = self.0 .0.get();
+        core::mem::forget(self);
+
+        // SAFETY: By type invariant, the wrapped request is valid.
+        unsafe { bindings::blk_mq_requeue_request(ptr, kick_requeue_list) };
+    }
 }
 
 impl<T: Operations> Ownable for IdleRequest<T> {
