@@ -82,6 +82,19 @@ impl Segment<'_> {
         Ok(())
     }
 
+    /// Limit the remaining length of the segment.
+    ///
+    /// Shortens the segment to at most `new_len` bytes. If `new_len` is
+    /// greater than or equal to the current remaining length, the segment is
+    /// left unchanged. The offset is not modified, so subsequent copy
+    /// operations still start from the current position.
+    #[inline]
+    pub fn truncate(&mut self, new_len: u32) {
+        if new_len < self.len() {
+            self.bio_vec.bv_len = new_len;
+        }
+    }
+
     /// Returns the page at index `page_idx` of the pages that back this segment.
     #[inline]
     fn page(&self, page_idx: usize) -> &Page<Shared> {
