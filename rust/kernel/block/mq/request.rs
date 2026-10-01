@@ -514,34 +514,40 @@ unsafe impl<T: Operations> Sync for Request<T> {}
 // matching reference count decrement is executed.
 unsafe impl<T: Operations> RefCounted for Request<T> {
     fn inc_ref(&self) {
-        let refcount = &self.wrapper_ref().refcount().as_atomic();
+        #[cfg(not(CONFIG_BLK_RUST_REFCOUNT_TEST))]
+        {
+            let refcount = &self.wrapper_ref().refcount().as_atomic();
 
-        // Load acquire, store relaxed. We sync with store release of
-        // `OwnableIntoShared::into_shared`. After that all unique references are dead and we have
-        // shared access. We can use relaxed ordering for the store.
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        let old = refcount.fetch_add(1, ordering::Acquire);
+            // Load acquire, store relaxed. We sync with store release of
+            // `OwnableIntoShared::into_shared`. After that all unique references are dead and we have
+            // shared access. We can use relaxed ordering for the store.
+            #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+            let old = refcount.fetch_add(1, ordering::Acquire);
 
-        debug_assert!(old >= 1, "Request refcount zero clone");
+            debug_assert!(old >= 1, "Request refcount zero clone");
+        }
     }
 
     unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
-        // SAFETY: The type invariants of `RefCounted` guarantee that `obj` is valid
-        // for read.
-        let wrapper_ptr = unsafe { Self::wrapper_ptr(obj.as_ptr()).as_ptr() };
-        // SAFETY: The type invariant of `Request` guarantees that the private
-        // data area is initialized and valid.
-        let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };
+        #[cfg(not(CONFIG_BLK_RUST_REFCOUNT_TEST))]
+        {
+            // SAFETY: The type invariants of `RefCounted` guarantee that `obj` is valid
+            // for read.
+            let wrapper_ptr = unsafe { Self::wrapper_ptr(obj.as_ptr()).as_ptr() };
+            // SAFETY: The type invariant of `Request` guarantees that the private
+            // data area is initialized and valid.
+            let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };
 
-        // Store release to sync with load acquire in
-        // `OwnableTryFromShared::try_from_shared`.
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        let old = refcount.as_atomic().fetch_sub(1, ordering::Release);
+            // Store release to sync with load acquire in
+            // `OwnableTryFromShared::try_from_shared`.
+            #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+            let old = refcount.as_atomic().fetch_sub(1, ordering::Release);
 
-        debug_assert!(
-            old > 1,
-            "Request reached refcount zero in Rust abstractions"
-        );
+            debug_assert!(
+                old > 1,
+                "Request reached refcount zero in Rust abstractions"
+            );
+        }
     }
 }
 
@@ -586,40 +592,69 @@ impl<T: Operations> Ownable for Request<T> {
     // Giving up the `Owned` role for a `Request` parks the request: the refcount goes from 0 to 1,
     // which means that the request is owned by the Rust abstractions but is not referenced.
     unsafe fn release(this: NonNull<Self>) {
-        // SAFETY: The safety requirements of this function guarantee that `this`
-        // is valid for read.
-        let wrapper_ptr = unsafe { Self::wrapper_ptr(this.as_ptr()).as_ptr() };
-        // SAFETY: The type invariant of `Request` guarantees that the private
-        // data area is initialized and valid.
-        let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };
+        #[cfg(not(CONFIG_BLK_RUST_REFCOUNT_TEST))]
+        {
+            // SAFETY: The safety requirements of this function guarantee that `this`
+            // is valid for read.
+            let wrapper_ptr = unsafe { Self::wrapper_ptr(this.as_ptr()).as_ptr() };
+            // SAFETY: The type invariant of `Request` guarantees that the private
+            // data area is initialized and valid.
+            let refcount = unsafe { &*RequestDataWrapper::refcount_ptr(wrapper_ptr) };
 
-        // Store release to sync with load acquire when converting back to owned.
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        let old = refcount.as_atomic().fetch_add(1, ordering::Release);
+            // Store release to sync with load acquire when converting back to owned.
+            #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+            let old = refcount.as_atomic().fetch_add(1, ordering::Release);
 
-        debug_assert!(
-            old == 0,
-            "Invalid refcount when releasing `Owned<Request<T>>`"
-        );
+            debug_assert!(
+                old == 0,
+                "Invalid refcount when releasing `Owned<Request<T>>`"
+            );
+        }
     }
 }
 
 impl<T: Operations> OwnableTryFromShared for Request<T> {
     fn try_from_shared(this: ARef<Self>) -> core::result::Result<Owned<Self>, ARef<Self>> {
-        // Load acquire to sync with decrement store release to make sure all
-        // shared access has ended.
-        let updated = this
-            .wrapper_ref()
-            .refcount()
-            .as_atomic()
-            .cmpxchg(2, 0, ordering::Acquire);
+        #[cfg(not(CONFIG_BLK_RUST_REFCOUNT_TEST))]
+        {
+            // Load acquire to sync with decrement store release to make sure all
+            // shared access has ended.
+            let updated =
+                this.wrapper_ref()
+                    .refcount()
+                    .as_atomic()
+                    .cmpxchg(2, 0, ordering::Acquire);
 
-        match updated {
-            Ok(_) => Ok(
-                // SAFETY: We achieved unique ownership above.
+            match updated {
+                Ok(_) => Ok(
+                    // INVARIANT: The refcount went from 2 to 0 above. A refcount of 2 means that
+                    // `this` was the only `ARef`, and we consume it here.
+                    // SAFETY:
+                    // - `this` points to a valid `Request`, and it stays valid until the request
+                    //   is handed back to the block layer.
+                    // - The refcount was not 0 before the exchange, so by the type invariants of
+                    //   `Request` no `Owned` existed for the request.
+                    // - A `struct request` is allocated in the tag set and is never moved.
+                    // - `this` was the only `ARef` and it is consumed here. In particular, no
+                    //   `RequestTimerHandle` exists for the request, as it would hold another
+                    //   `ARef`, so the request timer is not armed. No new `ARef` can be created
+                    //   while the refcount is 0, as `TagSet::tag_to_rq` waits for a non-zero
+                    //   refcount. Thus, no other Rust reference to the request exists, and it is
+                    //   sound to hand out `&Self` and `Pin<&mut Self>`.
+                    // - `Request` is `Send` and `Sync`, and has no logic that relies on it
+                    //   staying on a given thread.
+                    unsafe { Owned::from_raw(ARef::into_raw(this)) },
+                ),
+                Err(_) => Err(this),
+            }
+        }
+
+        #[cfg(CONFIG_BLK_RUST_REFCOUNT_TEST)]
+        {
+            Ok(
+                // SAFETY: yolo
                 unsafe { Owned::from_raw(ARef::into_raw(this)) },
-            ),
-            Err(_) => Err(this),
+            )
         }
     }
 }
@@ -629,12 +664,14 @@ impl<T: Operations> OwnableIntoShared for Request<T> {
         // Store release to sync with future increments using load acquire to
         // make sure exclusive access has ended before shared access start.
         #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+        #[cfg(not(CONFIG_BLK_RUST_REFCOUNT_TEST))]
         let old = this
             .wrapper_ref()
             .refcount()
             .as_atomic()
             .fetch_add(2, ordering::Release);
 
+        #[cfg(not(CONFIG_BLK_RUST_REFCOUNT_TEST))]
         debug_assert!(
             old == 0,
             "Invalid refcount when upgrading `Owned<Request<T>>`"
@@ -694,6 +731,7 @@ where
     pub fn dismiss(mut self) {
         let inner = core::ptr::from_mut(&mut self.inner);
 
+        #[cfg(not(CONFIG_BLK_RUST_REFCOUNT_TEST))]
         debug_assert!(
             self.inner
                 .wrapper_ref()

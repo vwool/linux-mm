@@ -26,6 +26,10 @@ menuconfig BLOCK
 
 if BLOCK
 
+config BLK_RUST_REFCOUNT_TEST
+       bool "Enable rust request refcount testing"
+       default n
+
 config BLOCK_LEGACY_AUTOLOAD
 	bool "Legacy autoloading support"
 	default y
