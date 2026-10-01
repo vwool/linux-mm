@@ -1,0 +1,8 @@
+block_size=4096
+completion_nsec=0
+irq_mode=0
+hw_queue_depth=256
+memory_backed=0
+size=4096
+rotational=0
+submit_queues=6

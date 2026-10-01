@@ -1,0 +1,6 @@
+device = "rnullb0"
+module = "rnull_mod"
+module_args = [ "nr_devices=0" ]
+modprobe = true
+configfs_rnull = true
+module_reload_policy = "Always"

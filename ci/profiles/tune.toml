@@ -1,0 +1,7 @@
+#disable_boost_amd = true
+amd_pstate_fixed_3ghz = true
+#disable_boost_intel = true
+#cpufreq_governor_performance = true
+use_hugepages = true
+disable_l2_stream_prefetcher_amd = true
+disable_aslr = true

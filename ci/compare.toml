@@ -1,0 +1,15 @@
+plot = [
+  ["rnull", "rnull-noref"],
+]
+
+[[build_configs]]
+name = "rnull"
+kernel_config = "rnull"
+latest_rustc = true
+profile = ["rnull", "ci", "tune", "stress", "fio-config", "dev-config"]
+
+[[build_configs]]
+name = "rnull-noref"
+kernel_config = "rnull-noref"
+latest_rustc = true
+profile = ["rnull", "ci", "tune", "stress", "fio-config", "dev-config"]

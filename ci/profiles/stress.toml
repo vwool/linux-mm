@@ -1,0 +1,8 @@
+prep = true
+samples = 20
+runtime = 300
+ramp = 10
+jobcounts = [ 2 ]
+workloads = [ "randread" ]
+block_sizes = [ "4KiB" ]
+queue_depths = [ 8 ]

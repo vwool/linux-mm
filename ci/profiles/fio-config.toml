@@ -1,0 +1,4 @@
+plot_gridx = "queue_depths"
+plot_gridy = "workloads"
+subplotx = "block_sizes"
+barcluster = "jobcounts"
