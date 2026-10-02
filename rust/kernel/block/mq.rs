@@ -114,7 +114,7 @@
 //!
 //! let tagset: Arc<TagSet<MyBlkDevice>> =
 //!     Arc::pin_init(
-//!         TagSet::new(1, (), 256, 1, NumaNode::NO_NODE, mq::tag_set::Flags::default()),
+//!         TagSet::new(1, (), 256, 1, NumaNode::NO_NODE, mq::tag_set::Flags::default(), 0),
 //!         GFP_KERNEL
 //!     )?;
 //! let mut disk = gen_disk::GenDiskBuilder::new()

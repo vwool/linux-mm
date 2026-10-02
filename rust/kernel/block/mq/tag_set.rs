@@ -60,6 +60,7 @@ impl<T: Operations> TagSet<T> {
         num_maps: u32,
         numa_node: NumaNode,
         flags: Flags,
+        timeout: u32,
     ) -> impl PinInit<Self, Error> {
         let tag_set: bindings::blk_mq_tag_set = pin_init::zeroed();
         let tag_set: Result<_> = size_of::<RequestDataWrapper<T>>()
@@ -68,7 +69,7 @@ impl<T: Operations> TagSet<T> {
                 bindings::blk_mq_tag_set {
                     ops: OperationsVTable::<T>::build(),
                     nr_hw_queues,
-                    timeout: 0, // 0 means default which is 30Hz in C
+                    timeout, // 0 means default which is 30Hz in C
                     numa_node: numa_node.id(),
                     queue_depth: num_tags,
                     cmd_size,

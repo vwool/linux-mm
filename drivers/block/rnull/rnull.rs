@@ -24,62 +24,28 @@ use kernel::alloc::scoped::{
     ScopeKind, //
 };
 use kernel::{
-    bindings,
-    block::{
-        self,
-        badblocks::{
+    bindings, block::{
+        self, SECTOR_SHIFT, badblocks::{
             self,
             BadBlocks, //
-        },
-        bio::Segment,
-        error::{
+        }, bio::Segment, error::{
             BlkError,
             BlkResult, //
-        },
-        mq::{
-            self,
-            gen_disk::{
+        }, mq::{
+            self, IdleRequest, IoCompletionBatch, Operations, RequestList, RequestTimeoutStatus, TagSet, gen_disk::{
                 self,
                 GenDisk,
                 GenDiskRef, //
-            },
-            IdleRequest,
-            IoCompletionBatch,
-            Operations,
-            RequestList,
-            RequestTimeoutStatus,
-            TagSet, //
+            }
         },
-        SECTOR_SHIFT,
-    },
-    error::{
-        code,
-        Result, //
-    },
-    ffi,
-    impl_has_hr_timer,
-    new_mutex,
-    new_spinlock,
-    page::PAGE_SIZE,
-    pr_info,
-    prelude::*,
-    revocable::Revocable,
-    str::CString,
-    sync::{
-        aref::ARef,
-        atomic::{
-            ordering,
-            Atomic, //
-        },
-        Arc,
-        ArcBorrow,
-        Mutex,
-        SetOnce,
-        SpinLock,
-        SpinLockGuard, //
-    },
-    time::{
-        hrtimer::{
+    }, error::{
+        Result, code
+    }, ffi, impl_has_hr_timer, new_mutex, new_spinlock, page::PAGE_SIZE, pr_info, prelude::*, revocable::Revocable, str::CString, sync::{
+        Arc, ArcBorrow, Mutex, SetOnce, SpinLock, SpinLockGuard, aref::ARef, atomic::{
+            Atomic, ordering
+        }
+    }, time::{
+        Delta, hrtimer::{
             self,
             ArcHrTimerHandle,
             HrTimer,
@@ -88,14 +54,11 @@ use kernel::{
             HrTimerPointer,
             HrTimerRestart, //
         },
-        Delta,
-    },
-    types::{
+    }, types::{
         OwnableIntoShared,
         OwnableTryFromShared,
         Owned, //
-    },
-    xarray::XArraySheaf, //
+    }, uapi::CONFIG_HZ, xarray::XArraySheaf
 };
 use util::*;
 
@@ -483,6 +446,7 @@ impl NullBlkDevice {
                 if poll_queues == 0 { 1 } else { 3 },
                 numa_node,
                 flags,
+                5 * CONFIG_HZ,
             ),
             GFP_KERNEL,
         )
@@ -587,7 +551,8 @@ impl NullBlkDevice {
             .rotational(rotational)
             .write_cache(storage.cache_enabled())
             .forced_unit_access(forced_unit_access && storage.cache_enabled())
-            .max_sectors(max_sectors);
+            .max_sectors(max_sectors)
+            .dma_alignment(1);
 
         if virt_boundary {
             builder = builder.virt_boundary_mask(PAGE_SIZE - 1);

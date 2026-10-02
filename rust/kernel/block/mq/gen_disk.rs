@@ -60,6 +60,7 @@ pub struct GenDiskBuilder<T> {
     forced_unit_access: bool,
     max_sectors: u32,
     virt_boundary_mask: usize,
+    dma_alignment: u32,
     _p: PhantomData<T>,
 }
 
@@ -81,6 +82,7 @@ impl<T> Default for GenDiskBuilder<T> {
             forced_unit_access: false,
             max_sectors: 0,
             virt_boundary_mask: 0,
+            dma_alignment: 0,
             _p: PhantomData,
         }
     }
@@ -200,6 +202,12 @@ impl<T: Operations> GenDiskBuilder<T> {
         self
     }
 
+    /// TODO
+    pub fn dma_alignment(mut self, alignment: u32) -> Self {
+        self.dma_alignment = alignment;
+        self
+    }
+
     /// Build a new `GenDisk` and add it to the VFS.
     pub fn build(
         self,
@@ -220,6 +228,7 @@ impl<T: Operations> GenDiskBuilder<T> {
         lim.max_hw_discard_sectors = self.max_hw_discard_sectors;
         lim.max_sectors = self.max_sectors;
         lim.virt_boundary_mask = self.virt_boundary_mask;
+        lim.dma_alignment = self.dma_alignment;
         if self.rotational {
             lim.features = Feature::Rotational.into();
         }
