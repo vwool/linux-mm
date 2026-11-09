@@ -196,6 +196,7 @@ impl<'a, 'b, 'c> DiskStorageAccess<'a, 'b, 'c> {
                     let src_data = src.page().as_slice();
                     let dst_data = disk_entry.page_mut().as_pin_mut().as_mut_slice();
                     let mut offset = 0;
+                    // TODO: Only copy dirty sectors.
                     for _ in 0..PAGE_SECTORS {
                         let sector = offset..offset + block::SECTOR_SIZE as usize;
                         dst_data[sector.clone()].copy_from_slice(&src_data[sector]);

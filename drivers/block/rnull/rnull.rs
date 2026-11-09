@@ -600,6 +600,7 @@ impl NullBlkDevice {
     ) -> Result {
         match sheaf {
             Some(sheaf) => {
+                // TODO: This unconditionally drops he locks. No need if sheaf is full.
                 tree_guard.do_unlocked(|| {
                     hw_data_guard.do_unlocked(|| sheaf.refill(GFP_KERNEL, Self::sheaf_size()))
                 })?;
@@ -619,6 +620,7 @@ impl NullBlkDevice {
         }
 
         // Another thread may get the lock after we allocate. If this happens, retry.
+        // TODO: Why is this a while, could it be `if`?
         while hw_data_guard.page.is_none() {
             hw_data_guard.page = Some(tree_guard.do_unlocked(|| {
                 hw_data_guard.do_unlocked(|| NullBlockPage::new(block_size_bytes))
@@ -640,10 +642,12 @@ impl NullBlkDevice {
         let mut sheaf: Option<XArraySheaf<'_>> = None;
 
         while !segment.at_end() {
+            // TODO: Maybe try the write without a sheaf. If it fails, allocate and fill a sheaf and retry.
             Self::preload(tree_guard, hw_data_guard, self.block_size_bytes, &mut sheaf)?;
 
             let mut access = self.storage.access(tree_guard, hw_data_guard, sheaf);
 
+            // TODO: Maybe check cache size > 0 before doing this.
             if bypass_cache {
                 if let Some(page) = access.get_cache_page(sector) {
                     page.set_free(sector);
@@ -653,6 +657,7 @@ impl NullBlkDevice {
             let page = access.get_write_page(sector, bypass_cache)?;
             page.set_occupied(sector);
 
+            // TODO: use utility functions instead of shifting.
             // CAST: Page offset always fits in 32 bits.
             let page_offset =
                 ((sector & u64::from(block::PAGE_SECTOR_MASK)) << block::SECTOR_SHIFT) as usize;
