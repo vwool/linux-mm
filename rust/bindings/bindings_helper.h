@@ -58,6 +58,7 @@
 #include <linux/dma-resv.h>
 #include <linux/errname.h>
 #include <linux/ethtool.h>
+#include <linux/fault-inject.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/firmware.h>
