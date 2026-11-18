@@ -12,11 +12,16 @@ use crate::{
         code::*,
         Result, //
     },
+    sync::aref::{
+        self,
+        ARef,
+        AlwaysRefCounted, //
+    },
+    types::Opaque,
     uaccess::UserSliceReader, //
 };
 use core::{
     marker::PhantomData,
-    mem::ManuallyDrop,
     ops::Deref,
     ptr::{
         self,
@@ -65,104 +70,106 @@ pub const fn page_align(addr: usize) -> Option<usize> {
     Some(sum & PAGE_MASK)
 }
 
-/// Representation of a non-owning reference to a [`Page`].
-///
-/// This type provides a borrowed version of a [`Page`] that is owned by some other entity, e.g. a
-/// [`Vmalloc`] allocation such as [`VBox`].
-///
-/// # Example
-///
-/// ```
-/// # use kernel::{bindings, prelude::*};
-/// use kernel::page::{BorrowedPage, Page, PAGE_SIZE};
-/// # use core::{mem::MaybeUninit, ptr, ptr::NonNull };
-///
-/// fn borrow_page<'a>(vbox: &'a mut VBox<MaybeUninit<[u8; PAGE_SIZE]>>) -> BorrowedPage<'a> {
-///     let ptr = ptr::from_ref(&**vbox);
-///
-///     // SAFETY: `ptr` is a valid pointer to `Vmalloc` memory.
-///     let page = unsafe { bindings::vmalloc_to_page(ptr.cast()) };
-///
-///     // SAFETY: `vmalloc_to_page` returns a valid pointer to a `struct page` for a valid
-///     // pointer to `Vmalloc` memory.
-///     let page = unsafe { NonNull::new_unchecked(page) };
-///
-///     // SAFETY:
-///     // - `self.0` is a valid pointer to a `struct page`.
-///     // - `self.0` is valid for the entire lifetime of `self`.
-///     unsafe { BorrowedPage::from_raw(page) }
-/// }
-///
-/// let mut vbox = VBox::<[u8; PAGE_SIZE]>::new_uninit(GFP_KERNEL)?;
-/// let page = borrow_page(&mut vbox);
-///
-/// // SAFETY: There is no concurrent read or write to this page.
-/// unsafe { page.fill_zero_raw(0, PAGE_SIZE)? };
-/// # Ok::<(), Error>(())
-/// ```
-///
-/// # Invariants
-///
-/// The borrowed underlying pointer to a `struct page` is valid for the entire lifetime `'a`.
-///
-/// [`VBox`]: kernel::alloc::VBox
-/// [`Vmalloc`]: kernel::alloc::allocator::Vmalloc
-pub struct BorrowedPage<'a>(ManuallyDrop<Page>, PhantomData<&'a Page>);
-
-impl<'a> BorrowedPage<'a> {
-    /// Constructs a [`BorrowedPage`] from a raw pointer to a `struct page`.
-    ///
-    /// # Safety
-    ///
-    /// - `ptr` must point to a valid `bindings::page`.
-    /// - `ptr` must remain valid for the entire lifetime `'a`.
-    pub unsafe fn from_raw(ptr: NonNull<bindings::page>) -> Self {
-        let page = Page { page: ptr };
-
-        // INVARIANT: The safety requirements guarantee that `ptr` is valid for the entire lifetime
-        // `'a`.
-        Self(ManuallyDrop::new(page), PhantomData)
-    }
-}
-
-impl<'a> Deref for BorrowedPage<'a> {
-    type Target = Page;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-/// Trait to be implemented by types which provide an [`Iterator`] implementation of
-/// [`BorrowedPage`] items, such as [`VmallocPageIter`](kernel::alloc::allocator::VmallocPageIter).
+/// Trait to be implemented by types which provide an [`Iterator`] of [`Page<Base>`] references,
+/// such as [`VmallocPageIter`](kernel::alloc::allocator::VmallocPageIter).
 pub trait AsPageIter {
     /// The [`Iterator`] type, e.g. [`VmallocPageIter`](kernel::alloc::allocator::VmallocPageIter).
-    type Iter<'a>: Iterator<Item = BorrowedPage<'a>>
+    type Iter<'a>: Iterator<Item = &'a Page<Base>>
     where
         Self: 'a;
 
-    /// Returns an [`Iterator`] of [`BorrowedPage`] items over all pages owned by `self`.
+    /// Returns an [`Iterator`] of [`Page<Base>`] references over all pages owned by `self`.
     fn page_iter(&mut self) -> Self::Iter<'_>;
 }
 
-/// A pointer to a page that owns the page allocation.
+mod private {
+    pub trait Sealed {}
+}
+
+/// Marker trait for the kinds of a [`Page`].
+///
+/// A page kind describes what is known about a `struct page`, and thereby what a [`Page`] of that
+/// kind can be used for. See [`Base`] and [`RefCounted`].
+///
+/// A [`Page`] of any other kind dereferences to a [`Page`] of the base kind [`Base`]. The
+/// purpose of the dereference is coercion: a reference to a page of any kind can be passed to code
+/// that takes a `&Page<Base>`.
+pub trait PageKind: private::Sealed {}
+
+/// The base [`PageKind`]: a valid page with no further guarantees.
+///
+/// Nothing is known about how the allocation of a [`Page<Base>`] is managed. In particular,
+/// the page is not necessarily managed by the page reference count. For instance, pages owned by
+/// the slab allocator are not. Thus, it is not possible to obtain an [`ARef`] from a
+/// `&Page<Base>`.
 ///
 /// # Invariants
 ///
-/// The pointer is valid, and has ownership over the page.
-pub struct Page {
-    page: NonNull<bindings::page>,
+/// A [`Page<Base>`] has no invariants in addition to the ones of [`Page`].
+pub struct Base;
+
+impl private::Sealed for Base {}
+impl PageKind for Base {}
+
+/// The default [`PageKind`]: a page that is managed by the page reference count.
+///
+/// A [`Page<RefCounted>`] is accessed through a shared reference or through an owning
+/// [`ARef<Page>`]. The page allocation is freed when the last reference to it is dropped.
+///
+/// # Invariants
+///
+/// For a [`Page<RefCounted>`]:
+///
+/// - The allocation of the page is managed by the page reference count, and the reference count is
+///   non-zero.
+/// - It is permitted to take additional references to the page with `get_page()`.
+pub struct RefCounted;
+
+impl private::Sealed for RefCounted {}
+impl PageKind for RefCounted {}
+
+/// A `struct page`.
+///
+/// A `Page` is generic over a [`PageKind`], which describes what is known about the page:
+///
+/// - `Page<Base>` is a page for which nothing is known beyond its validity.
+/// - `Page<RefCounted>`, or just `Page`, is a page that is managed by the page reference count.
+///
+/// Operations that are valid for any page are available for all page kinds. All other page kinds
+/// dereference to [`Page<Base>`], so that a reference to a page of any kind coerces to a
+/// `&Page<Base>`.
+///
+/// # Invariants
+///
+/// - The `Page` is backed by a valid `struct page`.
+/// - The invariants of `Kind` hold for the page, see the documentation of the [`PageKind`] types.
+#[repr(transparent)]
+pub struct Page<Kind: PageKind = RefCounted> {
+    page: Opaque<bindings::page>,
+    _kind: PhantomData<Kind>,
 }
 
 // SAFETY: Pages have no logic that relies on them staying on a given thread, so moving them across
 // threads is safe.
-unsafe impl Send for Page {}
+unsafe impl<Kind: PageKind> Send for Page<Kind> {}
 
 // SAFETY: Pages have no logic that relies on them not being accessed concurrently, so accessing
 // them concurrently is safe.
-unsafe impl Sync for Page {}
+unsafe impl<Kind: PageKind> Sync for Page<Kind> {}
 
-impl Page {
+impl Deref for Page<RefCounted> {
+    type Target = Page<Base>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `Page` is transparent over `struct page` for all page kinds, so the pointer cast
+        // is valid. `Base` has no invariants in addition to the ones of `Page`, which hold for
+        // `self`.
+        unsafe { &*ptr::from_ref(self).cast() }
+    }
+}
+
+impl Page<RefCounted> {
     /// Allocates a new page.
     ///
     /// # Examples
@@ -185,19 +192,22 @@ impl Page {
     /// # Ok::<(), kernel::alloc::AllocError>(())
     /// ```
     #[inline]
-    pub fn alloc_page(flags: Flags) -> Result<Self, AllocError> {
+    pub fn alloc_page(flags: Flags) -> Result<ARef<Self>, AllocError> {
         // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
         // is always safe to call this method.
         let page = unsafe { bindings::alloc_pages(flags.as_raw(), 0) };
         let page = NonNull::new(page).ok_or(AllocError)?;
-        // INVARIANT: We just successfully allocated a page, so we now have ownership of the newly
-        // allocated page. We transfer that ownership to the new `Page` object.
-        Ok(Self { page })
+        // SAFETY: We just successfully allocated a page, so we own the reference count returned
+        // by `alloc_pages`, and we transfer that reference to the new `ARef<Page>`. Since `Page`
+        // is transparent, we can cast the pointer directly.
+        Ok(unsafe { ARef::from_raw(page.cast()) })
     }
+}
 
+impl<Kind: PageKind> Page<Kind> {
     /// Returns a raw pointer to the page.
     pub fn as_ptr(&self) -> *mut bindings::page {
-        self.page.as_ptr()
+        self.page.get()
     }
 
     /// Get the node id containing this page.
@@ -373,10 +383,25 @@ impl Page {
     }
 }
 
-impl Drop for Page {
+// SAFETY: By the type invariant, a `Page<RefCounted>` is managed by the page reference count.
+// Incrementing it via `get_page()` keeps the page alive at least until a matching `put_page()`,
+// which frees the page when the count reaches zero.
+unsafe impl aref::RefCounted for Page<RefCounted> {
     #[inline]
-    fn drop(&mut self) {
-        // SAFETY: By the type invariants, we have ownership of the page and can free it.
-        unsafe { bindings::__free_pages(self.page.as_ptr(), 0) };
+    fn inc_ref(&self) {
+        // SAFETY: By the type invariant, `self.as_ptr()` points to a valid `struct page` with a
+        // non-zero reference count.
+        unsafe { bindings::get_page(self.as_ptr()) };
+    }
+
+    #[inline]
+    unsafe fn dec_ref(obj: NonNull<Self>) {
+        // SAFETY: By the function safety requirements, the caller relinquishes a reference count
+        // on the page. Since `Page` is transparent, we can cast the pointer directly.
+        unsafe { bindings::put_page(obj.cast().as_ptr()) };
     }
 }
+
+// SAFETY: All instances of `Page` are reference counted, so a `&Page` proves that the refcount is
+// non-zero and it is okay to obtain an `ARef<Page>` from it.
+unsafe impl AlwaysRefCounted for Page {}
