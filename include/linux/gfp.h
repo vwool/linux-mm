@@ -302,6 +302,15 @@ static inline struct folio *vma_alloc_folio_noprof(gfp_t gfp, int order,
 
 #define alloc_page(gfp_mask) alloc_pages(gfp_mask, 0)
 
+/*
+ * Allocate frozen pages. The reference count of a frozen page is zero, and
+ * references to it cannot be taken. The caller owns the pages and frees them
+ * with free_frozen_pages().
+ */
+struct page *alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order);
+#define alloc_frozen_pages(...)			alloc_hooks(alloc_frozen_pages_noprof(__VA_ARGS__))
+void free_frozen_pages(struct page *page, unsigned int order);
+
 static inline struct page *alloc_page_vma_noprof(gfp_t gfp,
 		struct vm_area_struct *vma, unsigned long addr)
 {

@@ -2993,6 +2993,7 @@ void free_frozen_pages(struct page *page, unsigned int order)
 {
 	__free_frozen_pages(page, order, FPI_NONE);
 }
+EXPORT_SYMBOL_GPL(free_frozen_pages);
 
 void free_frozen_pages_nolock(struct page *page, unsigned int order)
 {
@@ -5490,6 +5491,15 @@ out:
 	return page;
 }
 EXPORT_SYMBOL(__alloc_frozen_pages_noprof);
+
+#ifndef CONFIG_NUMA
+struct page *alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order)
+{
+	return __alloc_frozen_pages_noprof(gfp, order, numa_node_id(), NULL,
+					   ALLOC_DEFAULT);
+}
+EXPORT_SYMBOL_GPL(alloc_frozen_pages_noprof);
+#endif
 
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order,
 		int preferred_nid, nodemask_t *nodemask, unsigned int alloc_flags)

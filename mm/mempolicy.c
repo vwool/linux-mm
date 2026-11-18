@@ -2582,6 +2582,7 @@ struct page *alloc_frozen_pages_noprof(gfp_t gfp, unsigned order)
 	return alloc_pages_mpol(gfp, order, pol, NO_INTERLEAVE_INDEX,
 				       numa_node_id());
 }
+EXPORT_SYMBOL_GPL(alloc_frozen_pages_noprof);
 
 /**
  * alloc_pages - Allocate pages.
