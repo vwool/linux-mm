@@ -26,6 +26,11 @@ __rust_helper void rust_helper_put_page(struct page *page)
 	put_page(page);
 }
 
+__rust_helper void *rust_helper_page_address(const struct page *page)
+{
+	return page_address(page);
+}
+
 __rust_helper void *rust_helper_kmap_local_page(struct page *page)
 {
 	return kmap_local_page(page);

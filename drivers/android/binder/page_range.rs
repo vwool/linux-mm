@@ -538,7 +538,9 @@ impl ShrinkablePageRange {
         offset: usize,
         size: usize,
     ) -> Result {
-        // SAFETY: `self.iterate` has the same safety requirements as `copy_from_user_slice`.
+        // SAFETY: `self.iterate` has the same safety requirements as `copy_from_user_slice`. The
+        // pages of this range are `Page<RefCounted>` pages, and this driver never creates a
+        // reference to their data, so no reference to the data that is written exists.
         unsafe {
             self.iterate(offset, size, |page, offset, to_copy| {
                 page.copy_from_user_slice_raw(reader, offset, to_copy)
@@ -560,6 +562,9 @@ impl ShrinkablePageRange {
                 // SAFETY: The sum of `offset` and `to_copy` is bounded by the size of T.
                 let obj_ptr = out.as_mut_ptr().cast::<u8>().add(out_offset);
                 // SAFETY: The pointer points is in-bounds of the `out` variable, so it is valid.
+                // The pages of this range are `Page<RefCounted>` pages, and this driver never
+                // creates a reference to their data, so no mutable reference to the data that is
+                // read exists.
                 page.read_raw(obj_ptr, offset, to_copy)?;
                 out_offset += to_copy;
                 Ok(())
@@ -581,7 +586,10 @@ impl ShrinkablePageRange {
             self.iterate(offset, size_of_val(obj), |page, offset, to_copy| {
                 // SAFETY: The sum of `offset` and `to_copy` is bounded by the size of T.
                 let obj_ptr = ptr::from_ref(obj).cast::<u8>().add(obj_offset);
-                // SAFETY: We have a reference to the object, so the pointer is valid.
+                // SAFETY: We have a reference to the object, so the pointer is valid. The pages
+                // of this range are `Page<RefCounted>` pages, and this driver never creates a
+                // reference to their data, so no reference to the data that is written exists. As
+                // the page is not a `Page<Exclusive>`, the object does not have to be initialized.
                 page.write_raw(obj_ptr, offset, to_copy)?;
                 obj_offset += to_copy;
                 Ok(())
@@ -595,7 +603,9 @@ impl ShrinkablePageRange {
     ///
     /// All pages touched by this operation must be in use for the duration of this call.
     pub(crate) unsafe fn fill_zero(&self, offset: usize, size: usize) -> Result {
-        // SAFETY: `self.iterate` has the same safety requirements as `copy_into`.
+        // SAFETY: `self.iterate` has the same safety requirements as `fill_zero`. The pages of
+        // this range are `Page<RefCounted>` pages, and this driver never creates a reference to
+        // their data, so no reference to the data that is written exists.
         unsafe {
             self.iterate(offset, size, |page, offset, len| {
                 page.fill_zero_raw(offset, len)

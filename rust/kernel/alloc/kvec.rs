@@ -1230,7 +1230,8 @@ where
 ///
 /// let page = vec.page_iter().next().expect("At least one page should be available.\n");
 ///
-/// // SAFETY: There is no concurrent read or write to the same page.
+/// // SAFETY: There is no concurrent read or write to the same page, and no reference to the
+/// // data of the page exists.
 /// unsafe { page.fill_zero_raw(0, PAGE_SIZE)? };
 /// # Ok::<(), Error>(())
 /// ```

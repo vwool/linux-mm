@@ -195,7 +195,8 @@ impl Vmalloc {
     ///     // `ptr` is valid for the entire lifetime of `page`.
     ///     let page = unsafe { Vmalloc::to_page(ptr.cast()) };
     ///
-    ///     // SAFETY: There is no concurrent read or write to the same page.
+    ///     // SAFETY: There is no concurrent read or write to the same page, and no reference to
+    ///     // the data of the page exists.
     ///     unsafe { page.fill_zero_raw(0, page::PAGE_SIZE)? };
     /// }
     /// # Ok::<(), Error>(())

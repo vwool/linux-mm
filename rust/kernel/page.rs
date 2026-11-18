@@ -4,6 +4,10 @@
 
 use crate::{
     alloc::{
+        flags::{
+            __GFP_HIGHMEM,
+            __GFP_ZERO, //
+        },
         AllocError,
         Flags, //
     },
@@ -27,6 +31,7 @@ use crate::{
 use core::{
     marker::PhantomData,
     ops::Deref,
+    pin::Pin,
     ptr::{
         self,
         NonNull, //
@@ -333,6 +338,8 @@ impl<Kind: PageKind> Page<Kind> {
     /// * Callers must ensure that `dst` is valid for writing `len` bytes.
     /// * Callers must ensure that this call does not race with a write to the same page that
     ///   overlaps with this read.
+    /// * Callers must ensure that no mutable reference to the data of the page that overlaps with
+    ///   this read exists during this call.
     pub unsafe fn read_raw(&self, dst: *mut u8, offset: usize, len: usize) -> Result {
         self.with_pointer_into_page(offset, len, move |src| {
             // SAFETY: If `with_pointer_into_page` calls into this closure, then
@@ -355,6 +362,11 @@ impl<Kind: PageKind> Page<Kind> {
     /// * Callers must ensure that `src` is valid for reading `len` bytes.
     /// * Callers must ensure that this call does not race with a read or write to the same page
     ///   that overlaps with this write.
+    /// * Callers must ensure that no reference to the data of the page that overlaps with this
+    ///   write exists during this call. Such references can be obtained from a
+    ///   [`Page<Exclusive>`], see [`Page::as_slice`].
+    /// * If the page is a [`Page<Exclusive>`], callers must ensure that the `len` bytes at `src`
+    ///   are initialized.
     pub unsafe fn write_raw(&self, src: *const u8, offset: usize, len: usize) -> Result {
         self.with_pointer_into_page(offset, len, move |dst| {
             // SAFETY: If `with_pointer_into_page` calls into this closure, then it has performed a
@@ -373,8 +385,11 @@ impl<Kind: PageKind> Page<Kind> {
     ///
     /// # Safety
     ///
-    /// Callers must ensure that this call does not race with a read or write to the same page that
-    /// overlaps with this write.
+    /// * Callers must ensure that this call does not race with a read or write to the same page
+    ///   that overlaps with this write.
+    /// * Callers must ensure that no reference to the data of the page that overlaps with this
+    ///   write exists during this call. Such references can be obtained from a
+    ///   [`Page<Exclusive>`], see [`Page::as_slice`].
     pub unsafe fn fill_zero_raw(&self, offset: usize, len: usize) -> Result {
         self.with_pointer_into_page(offset, len, move |dst| {
             // SAFETY: If `with_pointer_into_page` calls into this closure, then it has performed a
@@ -396,8 +411,11 @@ impl<Kind: PageKind> Page<Kind> {
     ///
     /// # Safety
     ///
-    /// Callers must ensure that this call does not race with a read or write to the same page that
-    /// overlaps with this write.
+    /// * Callers must ensure that this call does not race with a read or write to the same page
+    ///   that overlaps with this write.
+    /// * Callers must ensure that no reference to the data of the page that overlaps with this
+    ///   write exists during this call. Such references can be obtained from a
+    ///   [`Page<Exclusive>`], see [`Page::as_slice`].
     pub unsafe fn copy_from_user_slice_raw(
         &self,
         reader: &mut UserSliceReader,
@@ -485,7 +503,7 @@ impl Page<Frozen> {
     /// let page = Page::alloc_frozen(GFP_KERNEL)?;
     ///
     /// // SAFETY: The page was just allocated and is not shared, so there are no concurrent reads
-    /// // or writes to the page.
+    /// // or writes to the page, and no reference to the data of the page exists.
     /// unsafe { page.fill_zero_raw(0, PAGE_SIZE)? };
     /// # Ok::<(), Error>(())
     /// ```
@@ -527,8 +545,8 @@ impl Ownable for Page<Frozen> {
 ///
 /// A [`Page<Exclusive>`] is accessed through an owning [`Owned<Page<Exclusive>>`]. It has the same
 /// usage constraints as other Rust types. Thus, it cannot be mapped to user space or shared with
-/// devices. This makes it safe to reference the contents of the page while the page is mapped in
-/// kernel space.
+/// devices. This makes it safe to reference the contents of the page, see [`Page::as_slice`] and
+/// [`Page::as_mut_slice`].
 ///
 /// A [`Page<Exclusive>`] is backed by a frozen page. The reference count of a frozen page is zero,
 /// and references to it cannot be taken. Thus, the exclusive ownership of the page is upheld by
@@ -546,7 +564,11 @@ impl Ownable for Page<Frozen> {
 ///   including the [`Page<Base>`] references it dereferences to.
 /// - Safe code reads the data of the page only through a shared reference, and writes it only
 ///   through a mutable reference. The unsafe raw accessors of [`Page`] can write through a shared
-///   reference, their callers are required to rule out races with all other accesses.
+///   reference, their callers are required to rule out races with all other accesses, and to
+///   ensure that no reference to the data they write exists.
+/// - The data of the page is initialized.
+/// - The page is not a highmem page, so its data is permanently mapped in the kernel address
+///   space.
 pub struct Exclusive;
 
 impl private::Sealed for Exclusive {}
@@ -567,23 +589,39 @@ impl Deref for Page<Exclusive> {
 impl Page<Exclusive> {
     /// Allocates a new exclusive page.
     ///
+    /// The page is always zeroed, and it is never allocated from highmem. That is, `__GFP_ZERO` is
+    /// added to `flags`, and `__GFP_HIGHMEM` is removed from `flags`.
+    ///
     /// # Examples
     ///
     /// ```
-    /// use kernel::page::Page;
+    /// use kernel::page::{
+    ///     Page,
+    ///     PAGE_SIZE, //
+    /// };
     ///
-    /// let page = Page::alloc_exclusive(GFP_KERNEL | __GFP_ZERO)?;
+    /// let mut page = Page::alloc_exclusive(GFP_KERNEL)?;
+    /// assert_eq!(page.as_slice().len(), PAGE_SIZE);
+    /// assert!(page.as_slice().iter().all(|byte| *byte == 0));
+    ///
+    /// page.as_pin_mut().as_mut_slice()[..4].copy_from_slice(&[1, 2, 3, 4]);
+    /// assert_eq!(page.as_slice()[..5], [1, 2, 3, 4, 0]);
     /// # Ok::<(), kernel::alloc::AllocError>(())
     /// ```
     #[inline]
     pub fn alloc_exclusive(flags: Flags) -> Result<Owned<Self>, AllocError> {
+        let flags = (flags | __GFP_ZERO) & !__GFP_HIGHMEM;
+
         // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
         // is always safe to call this method.
         let page = unsafe { bindings::alloc_frozen_pages(flags.as_raw(), 0) };
         let page = NonNull::new(page).ok_or(AllocError)?;
 
-        // INVARIANT: The page was just allocated with `alloc_frozen_pages()`, so it is frozen, we
-        // own it, and its data is only accessible through the returned `Owned<Page<Exclusive>>`.
+        // INVARIANT:
+        // - The page was just allocated with `alloc_frozen_pages()`, so it is frozen, we own it,
+        //   and its data is only accessible through the returned `Owned<Page<Exclusive>>`.
+        // - We allocated with `__GFP_ZERO`, so the data of the page is initialized.
+        // - We allocated without `__GFP_HIGHMEM`, so the page is not a highmem page.
         // SAFETY:
         // - We just successfully allocated the page, so `page` points to a valid `struct page`.
         //   Since `Page` is transparent over `struct page`, we can cast the pointer directly.
@@ -596,6 +634,42 @@ impl Page<Exclusive> {
         // - Pages have no logic that relies on them staying on a given thread or on them not being
         //   accessed concurrently.
         Ok(unsafe { Owned::from_raw(page.cast()) })
+    }
+
+    /// Returns a pointer to the data of the page.
+    #[inline]
+    fn data_ptr(&self) -> *mut u8 {
+        // SAFETY: By the type invariant of `Page`, `self.as_ptr()` points to a valid `struct page`.
+        unsafe { bindings::page_address(self.as_ptr()) }.cast()
+    }
+
+    /// Returns the data of the page as a slice of [`PAGE_SIZE`] bytes.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY:
+        // - By the type invariant, the page is not a highmem page, so `data_ptr()` returns a
+        //   non-null pointer that is valid for reads of `PAGE_SIZE` bytes for as long as the page
+        //   exists, which is at least the lifetime of `self`.
+        // - By the type invariant, the data of the page is initialized.
+        // - By the type invariant, the data of the page is only written by safe code through a
+        //   mutable reference to the page, which cannot exist together with `self`. Callers of the
+        //   unsafe raw accessors must ensure that no reference to the data they write exists.
+        //   Thus, the data is not mutated for the lifetime of the returned reference.
+        unsafe { core::slice::from_raw_parts(self.data_ptr(), PAGE_SIZE) }
+    }
+
+    /// Returns the data of the page as a mutable slice of [`PAGE_SIZE`] bytes.
+    #[inline]
+    pub fn as_mut_slice(self: Pin<&mut Self>) -> &mut [u8] {
+        // SAFETY:
+        // - By the type invariant, the page is not a highmem page, so `data_ptr()` returns a
+        //   non-null pointer that is valid for reads and writes of `PAGE_SIZE` bytes for as long as
+        //   the page exists, which is at least the lifetime of `self`.
+        // - By the type invariant, the data of the page is initialized.
+        // - By the type invariant, the data of the page is only accessed through references to the
+        //   page. `self` is a mutable reference, so no other reference to the page exists, and
+        //   thus no other access to the data happens for the lifetime of the returned reference.
+        unsafe { core::slice::from_raw_parts_mut(self.data_ptr(), PAGE_SIZE) }
     }
 }
 
