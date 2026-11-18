@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Rust RAM backed block device driver configuration
+
+config BLK_DEV_RUST_RAM
+	tristate "Rust RAM block device driver (Experimental)"
+	depends on RUST && CONFIGFS_FS
+	help
+	  This is a RAM backed block device driver written in Rust, based
+	  on the Rust null block driver. Like the C brd driver, it stores
+	  device contents in pages allocated on demand. Devices are created
+	  and configured through configfs under /sys/kernel/config/rbrd/.
+
+	  Device contents are lost when a device is powered off or the
+	  module is unloaded.
+
+	  If unsure, say N.
