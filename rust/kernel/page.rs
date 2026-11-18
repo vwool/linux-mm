@@ -217,6 +217,30 @@ impl<Kind: PageKind> Page<Kind> {
         unsafe { bindings::page_to_nid(self.as_ptr()) }
     }
 
+    /// Create a `&Page<Kind>` from a raw `struct page` pointer.
+    ///
+    /// It is up to the caller to select the correct [`PageKind`] for the page.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that, for the duration of `'a`:
+    /// - `ptr` is convertible to a shared reference.
+    /// - The invariants of `Kind` hold for the page pointed to by `ptr`, see the documentation of
+    ///   the [`PageKind`] types.
+    ///
+    /// Note that the invariants of [`RefCounted`] do not hold for all pages. For instance, pages
+    /// owned by the slab allocator are not managed by the page reference count. Use [`Base`] for
+    /// pages where nothing is known beyond their validity.
+    #[inline]
+    pub unsafe fn from_raw<'a>(ptr: *const bindings::page) -> &'a Self {
+        // INVARIANT: By the function safety requirements, `ptr` refers to a valid `struct page`
+        // for which the invariants of `Kind` hold, so the returned reference upholds the type
+        // invariants of `Page<Kind>`.
+        // SAFETY: By function safety requirements, `ptr` is not null and is convertible to a shared
+        // reference.
+        unsafe { &*ptr.cast() }
+    }
+
     /// Runs a piece of code with this page mapped to an address.
     ///
     /// The page is unmapped when this call returns.
