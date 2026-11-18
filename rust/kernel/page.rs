@@ -17,7 +17,11 @@ use crate::{
         ARef,
         AlwaysRefCounted, //
     },
-    types::Opaque,
+    types::{
+        Opaque,
+        Ownable,
+        Owned, //
+    },
     uaccess::UserSliceReader, //
 };
 use core::{
@@ -89,7 +93,7 @@ mod private {
 /// Marker trait for the kinds of a [`Page`].
 ///
 /// A page kind describes what is known about a `struct page`, and thereby what a [`Page`] of that
-/// kind can be used for. See [`Base`] and [`RefCounted`].
+/// kind can be used for. See [`Base`], [`RefCounted`] and [`Exclusive`].
 ///
 /// A [`Page`] of any other kind dereferences to a [`Page`] of the base kind [`Base`]. The
 /// purpose of the dereference is coercion: a reference to a page of any kind can be passed to code
@@ -134,6 +138,7 @@ impl PageKind for RefCounted {}
 ///
 /// - `Page<Base>` is a page for which nothing is known beyond its validity.
 /// - `Page<RefCounted>`, or just `Page`, is a page that is managed by the page reference count.
+/// - `Page<Exclusive>` is a uniquely owned page whose data follows standard Rust aliasing rules.
 ///
 /// Operations that are valid for any page are available for all page kinds. All other page kinds
 /// dereference to [`Page<Base>`], so that a reference to a page of any kind coerces to a
@@ -429,3 +434,90 @@ unsafe impl aref::RefCounted for Page<RefCounted> {
 // SAFETY: All instances of `Page` are reference counted, so a `&Page` proves that the refcount is
 // non-zero and it is okay to obtain an `ARef<Page>` from it.
 unsafe impl AlwaysRefCounted for Page {}
+
+/// A [`PageKind`] for a page whose data area follows standard Rust aliasing rules.
+///
+/// A [`Page<Exclusive>`] is accessed through an owning [`Owned<Page<Exclusive>>`]. It has the same
+/// usage constraints as other Rust types. Thus, it cannot be mapped to user space or shared with
+/// devices. This makes it safe to reference the contents of the page while the page is mapped in
+/// kernel space.
+///
+/// A [`Page<Exclusive>`] is backed by a frozen page. The reference count of a frozen page is zero,
+/// and references to it cannot be taken. Thus, the exclusive ownership of the page is upheld by
+/// the kernel, and not only by the Rust type system.
+///
+/// # Invariants
+///
+/// For a [`Page<Exclusive>`]:
+///
+/// - The page is an order 0 frozen page: it was allocated with `alloc_frozen_pages()`, and its
+///   reference count is zero for as long as the [`Page<Exclusive>`] exists.
+/// - The page is owned by a unique [`Owned<Page<Exclusive>>`]. No references to the page exist
+///   together with the [`Owned<Page<Exclusive>>`], other than the ones borrowed from it.
+/// - The data of the page is accessed only through references to the [`Page<Exclusive>`],
+///   including the [`Page<Base>`] references it dereferences to.
+/// - Safe code reads the data of the page only through a shared reference, and writes it only
+///   through a mutable reference. The unsafe raw accessors of [`Page`] can write through a shared
+///   reference, their callers are required to rule out races with all other accesses.
+pub struct Exclusive;
+
+impl private::Sealed for Exclusive {}
+impl PageKind for Exclusive {}
+
+impl Deref for Page<Exclusive> {
+    type Target = Page<Base>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `Page` is transparent over `struct page` for all page kinds, so the pointer cast
+        // is valid. `Base` has no invariants in addition to the ones of `Page`, which hold for
+        // `self`.
+        unsafe { &*ptr::from_ref(self).cast() }
+    }
+}
+
+impl Page<Exclusive> {
+    /// Allocates a new exclusive page.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::page::Page;
+    ///
+    /// let page = Page::alloc_exclusive(GFP_KERNEL | __GFP_ZERO)?;
+    /// # Ok::<(), kernel::alloc::AllocError>(())
+    /// ```
+    #[inline]
+    pub fn alloc_exclusive(flags: Flags) -> Result<Owned<Self>, AllocError> {
+        // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
+        // is always safe to call this method.
+        let page = unsafe { bindings::alloc_frozen_pages(flags.as_raw(), 0) };
+        let page = NonNull::new(page).ok_or(AllocError)?;
+
+        // INVARIANT: The page was just allocated with `alloc_frozen_pages()`, so it is frozen, we
+        // own it, and its data is only accessible through the returned `Owned<Page<Exclusive>>`.
+        // SAFETY:
+        // - We just successfully allocated the page, so `page` points to a valid `struct page`.
+        //   Since `Page` is transparent over `struct page`, we can cast the pointer directly.
+        // - The page was just allocated, so no other `Owned` exists for it.
+        // - A `struct page` is never moved, so the page is pinned.
+        // - `Page<Exclusive>` allows no other references to exist together with the `Owned`, and
+        //   none exist, as the page is newly allocated and references cannot be taken to a frozen
+        //   page. Thus, it is sound to hand out `&Page<Exclusive>` and
+        //   `Pin<&mut Page<Exclusive>>`.
+        // - Pages have no logic that relies on them staying on a given thread or on them not being
+        //   accessed concurrently.
+        Ok(unsafe { Owned::from_raw(page.cast()) })
+    }
+}
+
+impl Ownable for Page<Exclusive> {
+    #[inline]
+    unsafe fn release(this: NonNull<Self>) {
+        // SAFETY: By the function safety requirements, we have exclusive ownership of the page, and
+        // by the type invariant the page is an order 0 frozen page, so we can free it with
+        // `free_frozen_pages()`. Since `Page` is transparent over `struct page`, we can cast the
+        // pointer directly.
+        unsafe { bindings::free_frozen_pages(this.cast().as_ptr(), 0) };
+    }
+}

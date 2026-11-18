@@ -10,6 +10,12 @@ __rust_helper struct page *rust_helper_alloc_pages(gfp_t gfp_mask,
 	return alloc_pages(gfp_mask, order);
 }
 
+__rust_helper struct page *rust_helper_alloc_frozen_pages(gfp_t gfp_mask,
+							  unsigned int order)
+{
+	return alloc_frozen_pages(gfp_mask, order);
+}
+
 __rust_helper void rust_helper_get_page(struct page *page)
 {
 	get_page(page);
