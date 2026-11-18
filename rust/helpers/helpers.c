@@ -44,6 +44,7 @@
 #include "barrier.c"
 #include "binder.c"
 #include "bitmap.c"
+#include "bit_spinlock.c"
 #include "bitops.c"
 #include "blk.c"
 #include "bug.c"

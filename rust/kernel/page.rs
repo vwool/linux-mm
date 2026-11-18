@@ -16,6 +16,10 @@ use crate::{
         code::*,
         Result, //
     },
+    ffi::{
+        c_int,
+        c_ulong, //
+    },
     io::{
         Io,
         IoCopyable,
@@ -29,6 +33,7 @@ use crate::{
         AlwaysRefCounted, //
     },
     types::{
+        NotThreadSafe,
         Opaque,
         Ownable,
         Owned, //
@@ -706,6 +711,161 @@ impl Page<Shared> {
         //   `Send` and it cannot outlive the call to `f`, so the view is only used on the current
         //   task.
         unsafe { self.with_page_as_sysmem(offset, len, f) }
+    }
+}
+
+impl Page<RefCounted> {
+    /// Attempts to take a reference to a page from a raw, possibly stale pointer.
+    ///
+    /// Returns a new reference on success, or `None` if the reference count of the page had
+    /// already dropped to zero, i.e. if its last owner released it.
+    ///
+    /// This allows a lock-free lookup, such as `brd_lookup_page()`, to turn a page pointer it
+    /// loaded into a reference without knowing whether the page is still alive. A caller that
+    /// gets a reference checks that the pointer is still published where it was loaded from, since
+    /// the page may have been freed and reallocated in the meantime.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must point to a `struct page`. Unlike most kernel objects, a `struct page` is never
+    ///   freed: only the memory it describes is, once its reference count drops to zero. So it is
+    ///   safe to operate on the reference count through a pointer that was once validly obtained,
+    ///   even if the page has been released since.
+    /// - The page may have been reallocated to another user, who may manage it by other means than
+    ///   the page reference count, or who may access its data in any way. Thus, the caller must
+    ///   not access the data of the page through the returned reference, nor use it other than to
+    ///   drop it, until it has confirmed that the page is still the one it looked up.
+    #[inline]
+    pub unsafe fn try_get_raw(ptr: NonNull<Self>) -> Option<ARef<Self>> {
+        // SAFETY: By the safety requirements of this function, `ptr` points to a `struct page`.
+        if unsafe { bindings::get_page_unless_zero(ptr.as_ptr().cast()) } {
+            // INVARIANT: The reference count was non-zero, so the page is managed by it, and we
+            // just took a reference. The caller upholds the other invariants of `RefCounted`
+            // before it uses the page.
+            // SAFETY: We just took a reference to the page, which we transfer to the `ARef`.
+            Some(unsafe { ARef::from_raw(ptr) })
+        } else {
+            None
+        }
+    }
+
+    /// Returns a pointer to the `private` field of this page.
+    #[inline]
+    fn private_ptr(&self) -> *mut c_ulong {
+        // SAFETY: `self.as_ptr()` points to a valid `struct page` by the type invariant. Taking
+        // the address of a field neither reads nor writes it.
+        unsafe { &raw mut (*self.as_ptr()).__bindgen_anon_1.__bindgen_anon_1.private }
+    }
+
+    /// Acquires bit `BIT` of the `private` field of this page as a bit spinlock.
+    ///
+    /// Spins until the bit is clear, then sets it. The lock is released when the returned guard
+    /// is dropped. As with any spinlock, preemption is disabled while it is held. Bit spinlocks
+    /// are not tracked by lockdep.
+    ///
+    /// While the lock is held, the guard gives access to the data of the page as a slice, see
+    /// [`PagePrivateBitGuard::with_slice`] and [`PagePrivateBitGuard::with_mut_slice`]. This
+    /// allows a page that is shared through [`ARef`]s, such as a page holding the contents of a RAM
+    /// disk, to be read and written with plain memory accesses, without any other lock.
+    ///
+    /// # Safety
+    ///
+    /// - The caller must own the `private` field of the page, and only access it through this
+    ///   function while the page is shared. This is the case for a page allocated with
+    ///   [`Page::alloc_page`], which has `private` zeroed, as long as it is never handed to
+    ///   another user of `private`, such as the page cache.
+    /// - For as long as the page is shared, its data must only be accessed while holding this
+    ///   lock. In particular, it must not be accessed through [`Page::with_page_as_sysmem_local`]
+    ///   or the raw accessors without holding the lock, and it must not be handed to anyone who
+    ///   accesses it, such as a device or user space.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::page::Page;
+    ///
+    /// let page = Page::alloc_page(GFP_KERNEL)?;
+    ///
+    /// let data = [0xdeu8, 0xad, 0xbe, 0xef];
+    /// let mut buf = [0u8; 4];
+    /// {
+    ///     // SAFETY: `page` was just allocated. Its `private` field and its data are only
+    ///     // accessed through this lock.
+    ///     let mut guard = unsafe { page.lock_private_bit::<0>() };
+    ///     guard.with_mut_slice(|s| s[..4].copy_from_slice(&data));
+    ///     guard.with_slice(|s| buf.copy_from_slice(&s[..4]));
+    /// }
+    /// assert_eq!(buf, data);
+    /// # Ok::<(), kernel::alloc::AllocError>(())
+    /// ```
+    #[inline]
+    pub unsafe fn lock_private_bit<const BIT: u32>(&self) -> PagePrivateBitGuard<'_, BIT> {
+        const { assert!(BIT < c_ulong::BITS) };
+        // SAFETY: `private_ptr()` returns a valid pointer, and the caller guarantees that the
+        // field is only accessed by bit spinlock operations.
+        unsafe { bindings::bit_spin_lock(BIT as c_int, self.private_ptr()) };
+        // INVARIANT: The lock was just acquired and, by the safety requirements of this function,
+        // it serializes all accesses to the data of the page.
+        PagePrivateBitGuard {
+            page: self,
+            _not_send: NotThreadSafe,
+        }
+    }
+}
+
+/// A bit spinlock held in the `private` field of a [`Page`].
+///
+/// Created by [`Page::lock_private_bit`]. The lock is released when the guard is dropped. While
+/// it is held, the guard gives access to the data of the page as a slice.
+///
+/// # Invariants
+///
+/// The guard holds bit `BIT` of the `private` field of `page`, and holding that bit is required
+/// to access the data of the page.
+#[must_use = "the lock is released immediately when the guard is unused"]
+pub struct PagePrivateBitGuard<'a, const BIT: u32> {
+    page: &'a Page,
+    _not_send: NotThreadSafe,
+}
+
+impl<const BIT: u32> PagePrivateBitGuard<'_, BIT> {
+    /// Runs `f` with the data of the locked page as a slice of [`PAGE_SIZE`] bytes.
+    #[inline]
+    pub fn with_slice<T>(&self, f: impl FnOnce(&[u8]) -> T) -> T {
+        self.page.with_page_mapped(|ptr| {
+            // SAFETY:
+            // - `with_page_mapped` maps the page at `ptr` for `PAGE_SIZE` bytes for the duration
+            //   of this closure, and the slice does not escape it.
+            // - By the invariant of `Shared`, the data of the page is initialized.
+            // - By the type invariant, nobody else accesses the data of the page while we hold the
+            //   lock, and it is only written through `with_mut_slice`, which takes `&mut self` and
+            //   thus cannot run while this shared borrow of `self` exists. This is the exception
+            //   for references to the data of a `Page<Shared>` that the lock was taken for.
+            f(unsafe { core::slice::from_raw_parts(ptr, PAGE_SIZE) })
+        })
+    }
+
+    /// Runs `f` with the data of the locked page as a mutable slice of [`PAGE_SIZE`] bytes.
+    #[inline]
+    pub fn with_mut_slice<T>(&mut self, f: impl FnOnce(&mut [u8]) -> T) -> T {
+        self.page.with_page_mapped(|ptr| {
+            // SAFETY:
+            // - `with_page_mapped` maps the page at `ptr` for `PAGE_SIZE` bytes for the duration
+            //   of this closure, and the slice does not escape it.
+            // - By the invariant of `Shared`, the data of the page is initialized, and safe code
+            //   can only write initialized bytes through the slice.
+            // - By the type invariant, nobody else accesses the data of the page while we hold the
+            //   lock, and `&mut self` makes this the only access through the guard.
+            f(unsafe { core::slice::from_raw_parts_mut(ptr, PAGE_SIZE) })
+        })
+    }
+}
+
+impl<const BIT: u32> Drop for PagePrivateBitGuard<'_, BIT> {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: By the type invariant, we hold the lock.
+        unsafe { bindings::bit_spin_unlock(BIT as c_int, self.page.private_ptr()) };
     }
 }
 
