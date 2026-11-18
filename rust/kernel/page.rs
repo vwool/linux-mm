@@ -16,6 +16,10 @@ use crate::{
         code::*,
         Result, //
     },
+    ffi::{
+        c_int,
+        c_ulong, //
+    },
     io::{
         Io,
         IoCopyable,
@@ -29,6 +33,7 @@ use crate::{
         AlwaysRefCounted, //
     },
     types::{
+        NotThreadSafe,
         Opaque,
         Ownable,
         Owned, //
@@ -178,6 +183,7 @@ impl PageKind for RefCounted {}
 /// - `Page<Base>` is a page for which nothing is known beyond its validity.
 /// - `Page<Shared>` is a page whose data is initialized and not referenced by Rust references.
 /// - `Page<RefCounted>`, or just `Page`, is a page that is managed by the page reference count.
+/// - `Page<Guarded>` is a reference counted page whose data is only accessed under a lock.
 /// - `Page<Frozen>` is a uniquely owned page that references cannot be taken to.
 /// - `Page<Exclusive>` is a uniquely owned page whose data follows standard Rust aliasing rules.
 ///
@@ -708,6 +714,235 @@ impl Page<Shared> {
         unsafe { self.with_page_as_sysmem(offset, len, f) }
     }
 }
+
+/// A [`PageKind`] for a reference counted page whose data is only accessed under a lock.
+///
+/// Like a [`Page<RefCounted>`], a [`Page<Guarded>`] is managed by the page reference count and
+/// shared through [`ARef`]s. Its data, however, can only be reached through [`Page::lock_data`],
+/// which takes a bit spinlock in the `private` field of the page. Since that lock serializes all
+/// accesses to the data, the data can be accessed through plain Rust references while the lock is
+/// held, see [`PageDataGuard::with_slice`] and [`PageDataGuard::with_mut_slice`].
+///
+/// A [`Page<Guarded>`] only dereferences to a [`Page<Base>`]. Thus, the operations that access the
+/// data of a page in other ways, or that hand the page to someone who could, such as mapping it to
+/// user space, are not available for it. This is what makes [`Page::lock_data`] safe: the lock
+/// cannot be bypassed.
+///
+/// A [`Page<Guarded>`] suits a page used as plain memory that is shared between threads, such as
+/// a page holding the contents of a RAM disk.
+///
+/// # Invariants
+///
+/// For a [`Page<Guarded>`]:
+///
+/// - The page was allocated by [`Page::alloc_guarded`]. Its allocation is managed by the page
+///   reference count, and the reference count is non-zero.
+/// - The data of the page is initialized.
+/// - The `private` field of the page is only accessed as the bit spinlock of
+///   [`Page::lock_data`], and the data of the page is only accessed while holding that lock.
+pub struct Guarded;
+
+impl private::Sealed for Guarded {}
+impl PageKind for Guarded {}
+
+impl Deref for Page<Guarded> {
+    type Target = Page<Base>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `Page` is transparent over `struct page` for all page kinds, so the pointer cast
+        // is valid. `Base` has no invariants in addition to the ones of `Page`, which hold for
+        // `self`.
+        unsafe { &*ptr::from_ref(self).cast() }
+    }
+}
+
+/// The bit of `page->private` that [`Page::lock_data`] uses as a bit spinlock.
+const GUARDED_LOCK_BIT: c_int = 0;
+
+impl Page<Guarded> {
+    /// Allocates a new guarded page.
+    ///
+    /// The page is always zeroed. That is, `__GFP_ZERO` is added to `flags`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::page::Page;
+    ///
+    /// let page = Page::alloc_guarded(GFP_KERNEL)?;
+    ///
+    /// let data = [0xdeu8, 0xad, 0xbe, 0xef];
+    /// let mut buf = [0u8; 4];
+    /// {
+    ///     let mut guard = page.lock_data();
+    ///     guard.with_mut_slice(|s| s[..4].copy_from_slice(&data));
+    ///     guard.with_slice(|s| buf.copy_from_slice(&s[..4]));
+    /// }
+    /// assert_eq!(buf, data);
+    /// # Ok::<(), kernel::alloc::AllocError>(())
+    /// ```
+    #[inline]
+    pub fn alloc_guarded(flags: Flags) -> Result<ARef<Self>, AllocError> {
+        let flags = flags | __GFP_ZERO;
+
+        // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
+        // is always safe to call this method.
+        let page = unsafe { bindings::alloc_pages(flags.as_raw(), 0) };
+        let page = NonNull::new(page).ok_or(AllocError)?;
+        // INVARIANT: The page was just allocated with `alloc_pages()`, so it is managed by the
+        // page reference count, and we hold a reference. We allocated with `__GFP_ZERO`, so the
+        // data of the page is initialized. The page allocator clears `private` when it hands out
+        // a page, so the lock starts out released, and the page is newly allocated, so nothing
+        // else accesses its `private` field or its data.
+        // SAFETY: We just successfully allocated a page, so we own the reference count returned
+        // by `alloc_pages`, and we transfer that reference to the new `ARef`. Since `Page` is
+        // transparent, we can cast the pointer directly.
+        Ok(unsafe { ARef::from_raw(page.cast()) })
+    }
+
+    /// Attempts to take a reference to a page from a raw, possibly stale pointer.
+    ///
+    /// Returns a new reference on success, or `None` if the reference count of the page had
+    /// already dropped to zero, i.e. if its last owner released it.
+    ///
+    /// This allows a lock-free lookup, such as `brd_lookup_page()`, to turn a page pointer it
+    /// loaded into a reference without knowing whether the page is still alive. A caller that
+    /// gets a reference checks that the pointer is still published where it was loaded from, since
+    /// the page may have been freed and reallocated in the meantime.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been obtained from a [`Page<Guarded>`], for instance with
+    ///   [`ARef::into_raw`]. Unlike most kernel objects, a `struct page` is never freed: only the
+    ///   memory it describes is, once its reference count drops to zero. So it is safe to operate
+    ///   on the reference count through a pointer that was once validly obtained, even if the page
+    ///   has been released since.
+    /// - The page may have been freed and reallocated to another user since, who may manage it by
+    ///   other means than the page reference count, and who may use its `private` field and its
+    ///   data in any way. Thus, the caller must not use the returned reference other than to drop
+    ///   it until it has confirmed that the page is still the [`Page<Guarded>`] it looked up.
+    #[inline]
+    pub unsafe fn try_get_raw(ptr: NonNull<Self>) -> Option<ARef<Self>> {
+        // SAFETY: By the safety requirements of this function, `ptr` points to a `struct page`.
+        if unsafe { bindings::get_page_unless_zero(ptr.as_ptr().cast()) } {
+            // INVARIANT: The reference count was non-zero, so the page is managed by it, and we
+            // just took a reference. The caller confirms that the page is still a
+            // `Page<Guarded>` before it uses it otherwise than by dropping it.
+            // SAFETY: We just took a reference to the page, which we transfer to the `ARef`.
+            Some(unsafe { ARef::from_raw(ptr) })
+        } else {
+            None
+        }
+    }
+
+    /// Returns a pointer to the `private` field of this page.
+    #[inline]
+    fn private_ptr(&self) -> *mut c_ulong {
+        // SAFETY: `self.as_ptr()` points to a valid `struct page` by the type invariant. Taking
+        // the address of a field neither reads nor writes it.
+        unsafe { &raw mut (*self.as_ptr()).__bindgen_anon_1.__bindgen_anon_1.private }
+    }
+
+    /// Locks the data of this page.
+    ///
+    /// Spins until the bit spinlock in the `private` field of the page is released, then takes
+    /// it. The lock is released when the returned guard is dropped. As with any spinlock,
+    /// preemption is disabled while it is held. Bit spinlocks are not tracked by lockdep.
+    ///
+    /// While the lock is held, the guard gives access to the data of the page as a slice, see
+    /// [`PageDataGuard::with_slice`] and [`PageDataGuard::with_mut_slice`].
+    #[inline]
+    pub fn lock_data(&self) -> PageDataGuard<'_> {
+        // SAFETY: `private_ptr()` returns a valid pointer, and by the type invariant, the field is
+        // only accessed by this lock.
+        unsafe { bindings::bit_spin_lock(GUARDED_LOCK_BIT, self.private_ptr()) };
+        // INVARIANT: The lock was just acquired.
+        PageDataGuard {
+            page: self,
+            _not_send: NotThreadSafe,
+        }
+    }
+}
+
+/// The lock on the data of a [`Page<Guarded>`].
+///
+/// Created by [`Page::lock_data`]. The lock is released when the guard is dropped. While it is
+/// held, the guard gives access to the data of the page as a slice.
+///
+/// # Invariants
+///
+/// The guard holds the lock of [`Page::lock_data`] on `page`.
+#[must_use = "the lock is released immediately when the guard is unused"]
+pub struct PageDataGuard<'a> {
+    page: &'a Page<Guarded>,
+    _not_send: NotThreadSafe,
+}
+
+impl PageDataGuard<'_> {
+    /// Runs `f` with the data of the locked page as a slice of [`PAGE_SIZE`] bytes.
+    #[inline]
+    pub fn with_slice<T>(&self, f: impl FnOnce(&[u8]) -> T) -> T {
+        self.page.with_page_mapped(|ptr| {
+            // SAFETY:
+            // - `with_page_mapped` maps the page at `ptr` for `PAGE_SIZE` bytes for the duration
+            //   of this closure, and the slice does not escape it.
+            // - By the invariant of `Guarded`, the data of the page is initialized.
+            // - By the invariant of `Guarded` and the type invariant, nobody else accesses the
+            //   data of the page while we hold the lock, and it is only written through
+            //   `with_mut_slice`, which takes `&mut self` and thus cannot run while this shared
+            //   borrow of `self` exists.
+            f(unsafe { core::slice::from_raw_parts(ptr, PAGE_SIZE) })
+        })
+    }
+
+    /// Runs `f` with the data of the locked page as a mutable slice of [`PAGE_SIZE`] bytes.
+    #[inline]
+    pub fn with_mut_slice<T>(&mut self, f: impl FnOnce(&mut [u8]) -> T) -> T {
+        self.page.with_page_mapped(|ptr| {
+            // SAFETY:
+            // - `with_page_mapped` maps the page at `ptr` for `PAGE_SIZE` bytes for the duration
+            //   of this closure, and the slice does not escape it.
+            // - By the invariant of `Guarded`, the data of the page is initialized, and safe code
+            //   can only write initialized bytes through the slice.
+            // - By the invariant of `Guarded` and the type invariant, nobody else accesses the
+            //   data of the page while we hold the lock, and `&mut self` makes this the only
+            //   access through the guard.
+            f(unsafe { core::slice::from_raw_parts_mut(ptr, PAGE_SIZE) })
+        })
+    }
+}
+
+impl Drop for PageDataGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: By the type invariant, we hold the lock.
+        unsafe { bindings::bit_spin_unlock(GUARDED_LOCK_BIT, self.page.private_ptr()) };
+    }
+}
+
+// SAFETY: By the type invariant, a `Page<Guarded>` is managed by the page reference count.
+// Incrementing it via `get_page()` keeps the page alive at least until a matching `put_page()`,
+// which frees the page when the count reaches zero.
+unsafe impl aref::RefCounted for Page<Guarded> {
+    #[inline]
+    fn inc_ref(&self) {
+        // SAFETY: By the type invariant, `self.as_ptr()` points to a valid `struct page` with a
+        // non-zero reference count.
+        unsafe { bindings::get_page(self.as_ptr()) };
+    }
+
+    #[inline]
+    unsafe fn dec_ref(obj: NonNull<Self>) {
+        // SAFETY: By the function safety requirements, the caller relinquishes a reference count
+        // on the page. Since `Page` is transparent, we can cast the pointer directly.
+        unsafe { bindings::put_page(obj.cast().as_ptr()) };
+    }
+}
+
+// SAFETY: A `&Page<Guarded>` proves that the reference count is non-zero, so it is okay to obtain
+// an `ARef<Page<Guarded>>` from it.
+unsafe impl AlwaysRefCounted for Page<Guarded> {}
 
 // SAFETY: By the type invariant, a `Page<RefCounted>` is managed by the page reference count.
 // Incrementing it via `get_page()` keeps the page alive at least until a matching `put_page()`,

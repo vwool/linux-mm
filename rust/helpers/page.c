@@ -47,3 +47,8 @@ __rust_helper int rust_helper_page_to_nid(const struct page *page)
 	return page_to_nid(page);
 }
 #endif
+
+__rust_helper bool rust_helper_get_page_unless_zero(struct page *page)
+{
+	return get_page_unless_zero(page);
+}
