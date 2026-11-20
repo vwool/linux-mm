@@ -600,8 +600,7 @@ impl<Kind: PageKind> Page<Kind> {
     /// # Safety
     ///
     /// * Callers must ensure that this call does not race with a read or write to the same page
-    ///   that overlaps with this write. This includes byte-wise atomic accesses, as this method
-    ///   writes to the page with plain accesses.
+    ///   that overlaps with this write.
     /// * Callers must ensure that no reference to the data of the page that overlaps with this
     ///   write exists during this call. Such references can be obtained from a
     ///   [`Page<Exclusive>`], see [`Page::as_slice`].
@@ -613,9 +612,9 @@ impl<Kind: PageKind> Page<Kind> {
     ) -> Result {
         self.with_pointer_into_page(offset, len, move |dst| {
             // SAFETY: If `with_pointer_into_page` calls into this closure, then it has performed a
-            // bounds check and guarantees that `dst` is valid for `len` bytes. Furthermore, we have
-            // exclusive access to the slice since the caller guarantees that there are no races.
-            reader.read_raw(unsafe { core::slice::from_raw_parts_mut(dst.cast(), len) })
+            // bounds check and guarantees that `dst` is valid for `len` bytes. The caller
+            // guarantees that there are no races, so `dst` is valid for atomic writes.
+            unsafe { reader.read_raw(dst, len) }
         })
     }
 }

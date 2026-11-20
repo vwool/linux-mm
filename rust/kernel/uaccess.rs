@@ -252,25 +252,38 @@ impl UserSliceReader {
         self.length == 0
     }
 
-    /// Reads raw data from the user slice into a kernel buffer.
+    /// Reads raw data from the user slice into the kernel memory at `out`.
     ///
-    /// For a version that uses `&mut [u8]`, please see [`UserSliceReader::read_slice`].
+    /// The writes to `out` are byte-wise atomic, so they are well-defined even if the memory at
+    /// `out` is concurrently accessed by hardware, by user space, or by other kernel code using
+    /// atomic or volatile accesses. For a safe version that uses `&mut [u8]`, please see
+    /// [`UserSliceReader::read_slice`].
     ///
     /// Fails with [`EFAULT`] if the read happens on a bad address, or if the read goes out of
-    /// bounds of this [`UserSliceReader`]. This call may modify `out` even if it returns an error.
+    /// bounds of this [`UserSliceReader`]. This call may modify the memory at `out` even if it
+    /// returns an error.
+    ///
+    /// Implementation note: this is implemented by the kernel's `copy_from_user()`, which is
+    /// implemented in a way such that byte-wise atomic memory store instructions are used.
     ///
     /// # Guarantees
     ///
-    /// After a successful call to this method, all bytes in `out` are initialized.
-    pub fn read_raw(&mut self, out: &mut [MaybeUninit<u8>]) -> Result {
-        let len = out.len();
-        let out_ptr = out.as_mut_ptr().cast::<c_void>();
+    /// This method only writes initialized bytes to `out`. After a successful call to this method,
+    /// all `len` bytes at `out` are initialized.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `out` is valid for atomic writes for `len` bytes for the duration
+    /// of the call.
+    pub unsafe fn read_raw(&mut self, out: *mut u8, len: usize) -> Result {
         if len > self.length {
             return Err(EFAULT);
         }
-        // SAFETY: `out_ptr` points into a mutable slice of length `len`, so we may write
-        // that many bytes to it.
-        let res = unsafe { bindings::copy_from_user(out_ptr, self.ptr.as_const_ptr(), len) };
+        // SAFETY: By the safety requirements of this function, `out` is valid for atomic writes
+        // for `len` bytes. `copy_from_user()` is a byte-wise atomic operation on the kernel
+        // memory.
+        let res =
+            unsafe { bindings::copy_from_user(out.cast::<c_void>(), self.ptr.as_const_ptr(), len) };
         if res != 0 {
             return Err(EFAULT);
         }
@@ -284,10 +297,10 @@ impl UserSliceReader {
     /// Fails with [`EFAULT`] if the read happens on a bad address, or if the read goes out of
     /// bounds of this [`UserSliceReader`]. This call may modify `out` even if it returns an error.
     pub fn read_slice(&mut self, out: &mut [u8]) -> Result {
-        // SAFETY: The types are compatible and `read_raw` doesn't write uninitialized bytes to
-        // `out`.
-        let out = unsafe { &mut *(core::ptr::from_mut(out) as *mut [MaybeUninit<u8>]) };
-        self.read_raw(out)
+        // SAFETY: `out` is a mutable slice, so it is valid for writing `out.len()` bytes, and
+        // nothing else accesses it during this call. `read_raw` doesn't write uninitialized bytes
+        // to `out`.
+        unsafe { self.read_raw(out.as_mut_ptr(), out.len()) }
     }
 
     /// Reads raw data from the user slice into a kernel buffer partially.
@@ -372,7 +385,11 @@ impl UserSliceReader {
         buf.reserve(len, flags)?;
 
         // The call to `reserve` was successful, so the spare capacity is at least `len` bytes long.
-        self.read_raw(&mut buf.spare_capacity_mut()[..len])?;
+        let spare = &mut buf.spare_capacity_mut()[..len];
+
+        // SAFETY: `spare` is a mutable slice, so it is valid for writing `spare.len()` bytes, and
+        // nothing else accesses it during this call.
+        unsafe { self.read_raw(spare.as_mut_ptr().cast(), spare.len()) }?;
 
         // SAFETY: Since the call to `read_raw` was successful, so the next `len` bytes of the
         // vector have been initialized.
