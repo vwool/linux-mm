@@ -588,8 +588,10 @@ impl ShrinkablePageRange {
                 let obj_ptr = ptr::from_ref(obj).cast::<u8>().add(obj_offset);
                 // SAFETY: We have a reference to the object, so the pointer is valid. The pages
                 // of this range are `Page<RefCounted>` pages, and this driver never creates a
-                // reference to their data, so no reference to the data that is written exists. As
-                // the page is not a `Page<Exclusive>`, the object does not have to be initialized.
+                // reference to their data, so no reference to the data that is written exists.
+                // TODO: `write_raw()` requires the bytes of the object to be initialized, as the
+                // data of a `Page<RefCounted>` is initialized. `T` is not bounded by `IntoBytes`,
+                // so this is not ensured for a `T` with padding.
                 page.write_raw(obj_ptr, offset, to_copy)?;
                 obj_offset += to_copy;
                 Ok(())

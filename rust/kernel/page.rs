@@ -104,11 +104,13 @@ mod private {
 /// Marker trait for the kinds of a [`Page`].
 ///
 /// A page kind describes what is known about a `struct page`, and thereby what a [`Page`] of that
-/// kind can be used for. See [`Base`], [`RefCounted`], [`Frozen`] and [`Exclusive`].
+/// kind can be used for. See [`Base`], [`Shared`], [`RefCounted`], [`Frozen`] and [`Exclusive`].
 ///
 /// A [`Page`] of any other kind dereferences to a [`Page`] of the base kind [`Base`]. The
 /// purpose of the dereference is coercion: a reference to a page of any kind can be passed to code
-/// that takes a `&Page<Base>`.
+/// that takes a `&Page<Base>`. A [`Page<RefCounted>`] and a [`Page<Frozen>`] dereference to a
+/// [`Page<Shared>`], which in turn dereferences to a [`Page<Base>`]. A [`Page<Exclusive>`]
+/// dereferences directly to a [`Page<Base>`], as Rust references to its data can exist.
 pub trait PageKind: private::Sealed {}
 
 /// The base [`PageKind`]: a valid page with no further guarantees.
@@ -126,6 +128,29 @@ pub struct Base;
 impl private::Sealed for Base {}
 impl PageKind for Base {}
 
+/// A [`PageKind`] for a page whose data is not subject to the Rust aliasing rules.
+///
+/// The data of a [`Page<Shared>`] can be accessed concurrently by other parties, such as user
+/// space, devices or other kernel code. Thus, no Rust reference to the data of the page exists.
+///
+/// A [`Page<RefCounted>`] and a [`Page<Frozen>`] dereference to a [`Page<Shared>`]. A page that
+/// is managed by other means can be referenced as a [`Page<Shared>`] with [`Page::from_raw`].
+///
+/// # Invariants
+///
+/// For a [`Page<Shared>`]:
+///
+/// - No Rust reference to the data of the page exists, except for the duration of an unsafe
+///   operation whose caller rules out all other accesses to that data. In particular, the page is
+///   not a [`Page<Exclusive>`].
+/// - The data of the page is initialized.
+/// - No plain access to the data of the page races with another access to that data. A plain
+///   access is a non-atomic, non-volatile access performed by kernel code.
+pub struct Shared;
+
+impl private::Sealed for Shared {}
+impl PageKind for Shared {}
+
 /// The default [`PageKind`]: a page that is managed by the page reference count.
 ///
 /// A [`Page<RefCounted>`] is accessed through a shared reference or through an owning
@@ -138,6 +163,7 @@ impl PageKind for Base {}
 /// - The allocation of the page is managed by the page reference count, and the reference count is
 ///   non-zero.
 /// - It is permitted to take additional references to the page with `get_page()`.
+/// - The invariants of [`Shared`] hold for the page.
 pub struct RefCounted;
 
 impl private::Sealed for RefCounted {}
@@ -148,13 +174,14 @@ impl PageKind for RefCounted {}
 /// A `Page` is generic over a [`PageKind`], which describes what is known about the page:
 ///
 /// - `Page<Base>` is a page for which nothing is known beyond its validity.
+/// - `Page<Shared>` is a page whose data is initialized and not referenced by Rust references.
 /// - `Page<RefCounted>`, or just `Page`, is a page that is managed by the page reference count.
 /// - `Page<Frozen>` is a uniquely owned page that references cannot be taken to.
 /// - `Page<Exclusive>` is a uniquely owned page whose data follows standard Rust aliasing rules.
 ///
 /// Operations that are valid for any page are available for all page kinds. All other page kinds
 /// dereference to [`Page<Base>`], so that a reference to a page of any kind coerces to a
-/// `&Page<Base>`.
+/// `&Page<Base>`. See [`PageKind`] for details.
 ///
 /// # Invariants
 ///
@@ -174,7 +201,7 @@ unsafe impl<Kind: PageKind> Send for Page<Kind> {}
 // them concurrently is safe.
 unsafe impl<Kind: PageKind> Sync for Page<Kind> {}
 
-impl Deref for Page<RefCounted> {
+impl Deref for Page<Shared> {
     type Target = Page<Base>;
 
     #[inline]
@@ -186,12 +213,24 @@ impl Deref for Page<RefCounted> {
     }
 }
 
+impl Deref for Page<RefCounted> {
+    type Target = Page<Shared>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `Page` is transparent over `struct page` for all page kinds, so the pointer cast
+        // is valid. By the type invariant of `Page<RefCounted>`, the invariants of `Shared` hold
+        // for `self`.
+        unsafe { &*ptr::from_ref(self).cast() }
+    }
+}
+
 impl Page<RefCounted> {
     /// Allocates a new page.
     ///
-    /// # Examples
+    /// The page is always zeroed. That is, `__GFP_ZERO` is added to `flags`.
     ///
-    /// Allocate memory for a page.
+    /// # Examples
     ///
     /// ```
     /// use kernel::page::Page;
@@ -199,21 +238,17 @@ impl Page<RefCounted> {
     /// let page = Page::alloc_page(GFP_KERNEL)?;
     /// # Ok::<(), kernel::alloc::AllocError>(())
     /// ```
-    ///
-    /// Allocate memory for a page and zero its contents.
-    ///
-    /// ```
-    /// use kernel::page::Page;
-    ///
-    /// let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
-    /// # Ok::<(), kernel::alloc::AllocError>(())
-    /// ```
     #[inline]
     pub fn alloc_page(flags: Flags) -> Result<ARef<Self>, AllocError> {
+        let flags = flags | __GFP_ZERO;
+
         // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
         // is always safe to call this method.
         let page = unsafe { bindings::alloc_pages(flags.as_raw(), 0) };
         let page = NonNull::new(page).ok_or(AllocError)?;
+        // INVARIANT: The page was just allocated with `alloc_pages()`, so it is managed by the
+        // page reference count. We allocated with `__GFP_ZERO`, so the data of the page is
+        // initialized. The page is newly allocated, so nothing references or accesses its data.
         // SAFETY: We just successfully allocated a page, so we own the reference count returned
         // by `alloc_pages`, and we transfer that reference to the new `ARef<Page>`. Since `Page`
         // is transparent, we can cast the pointer directly.
@@ -246,8 +281,10 @@ impl<Kind: PageKind> Page<Kind> {
     ///   the [`PageKind`] types.
     ///
     /// Note that the invariants of [`RefCounted`] do not hold for all pages. For instance, pages
-    /// owned by the slab allocator are not managed by the page reference count. Use [`Base`] for
-    /// pages where nothing is known beyond their validity.
+    /// owned by the slab allocator are not managed by the page reference count. Likewise, the
+    /// invariants of [`Shared`] do not hold for a page whose data is referenced by Rust
+    /// references, or whose data is not initialized. Use [`Base`] for pages where nothing is
+    /// known beyond their validity.
     #[inline]
     pub unsafe fn from_raw<'a>(ptr: *const bindings::page) -> &'a Self {
         // INVARIANT: By the function safety requirements, `ptr` refers to a valid `struct page`
@@ -352,8 +389,8 @@ impl<Kind: PageKind> Page<Kind> {
     ///   the mapped range exists during this call. If `f` writes through the view, no reference to
     ///   that data may exist during this call. Such references can be obtained from a
     ///   [`Page<Exclusive>`], see [`Page::as_slice`].
-    /// * If the page is a [`Page<Exclusive>`], `f` must only write initialized bytes through the
-    ///   view.
+    /// * If the page is referenced as a [`Page`] of another kind than [`Base`], `f` must only
+    ///   write initialized bytes through the view.
     /// * Callers must ensure that the view is only used on the current task, as this method may
     ///   use a local mapping.
     unsafe fn with_page_as_sysmem<T>(
@@ -477,8 +514,9 @@ impl<Kind: PageKind> Page<Kind> {
     /// * Callers must ensure that no reference to the data of the page that overlaps with this
     ///   write exists during this call. Such references can be obtained from a
     ///   [`Page<Exclusive>`], see [`Page::as_slice`].
-    /// * If the page is a [`Page<Exclusive>`], callers must ensure that the `len` bytes at `src`
-    ///   are initialized.
+    /// * If the page is referenced as a [`Page`] of another kind than [`Base`], callers must
+    ///   ensure that the `len` bytes at `src` are initialized, as the invariants of those page
+    ///   kinds require the data of the page to be initialized.
     pub unsafe fn write_raw(&self, src: *const u8, offset: usize, len: usize) -> Result {
         let copy = |dst: SysMem<'_, [u8]>| {
             // SAFETY: By the safety requirements of this function, `src` is valid for reading
@@ -513,7 +551,8 @@ impl<Kind: PageKind> Page<Kind> {
     /// - No reference to the data of the page that overlaps with this write exists during this
     ///   call. Such references can be obtained from a [`Page<Exclusive>`], see
     ///   [`Page::as_slice`].
-    /// - If the page is a [`Page<Exclusive>`], the bytes of `src` are initialized.
+    /// - If the page is referenced as a [`Page`] of another kind than [`Base`], the bytes of `src`
+    ///   are initialized.
     /// - The memory region of `src` does not overlap with the memory of the page.
     ///
     /// # Examples
@@ -650,7 +689,8 @@ unsafe impl AlwaysRefCounted for Page {}
 ///
 /// Unlike for a [`Page<Exclusive>`], nothing is known about who accesses the data of a
 /// [`Page<Frozen>`]. For instance, the owner can share the data of the page with a device. Thus,
-/// the data is accessed through the unsafe raw accessors of [`Page`] only.
+/// no Rust reference to the data of the page exists, and a [`Page<Frozen>`] dereferences to a
+/// [`Page<Shared>`].
 ///
 /// # Invariants
 ///
@@ -660,18 +700,19 @@ unsafe impl AlwaysRefCounted for Page {}
 ///   reference count is zero for as long as the [`Page<Frozen>`] exists.
 /// - The page is owned by a unique [`Owned<Page<Frozen>>`]. No references to the page exist
 ///   together with the [`Owned<Page<Frozen>>`], other than the ones borrowed from it.
+/// - The invariants of [`Shared`] hold for the page.
 pub struct Frozen;
 
 impl private::Sealed for Frozen {}
 impl PageKind for Frozen {}
 
 impl Deref for Page<Frozen> {
-    type Target = Page<Base>;
+    type Target = Page<Shared>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
         // SAFETY: `Page` is transparent over `struct page` for all page kinds, so the pointer cast
-        // is valid. `Base` has no invariants in addition to the ones of `Page`, which hold for
+        // is valid. By the type invariant of `Page<Frozen>`, the invariants of `Shared` hold for
         // `self`.
         unsafe { &*ptr::from_ref(self).cast() }
     }
@@ -680,30 +721,28 @@ impl Deref for Page<Frozen> {
 impl Page<Frozen> {
     /// Allocates a new frozen page.
     ///
+    /// The page is always zeroed. That is, `__GFP_ZERO` is added to `flags`.
+    ///
     /// # Examples
     ///
     /// ```
-    /// use kernel::page::{
-    ///     Page,
-    ///     PAGE_SIZE, //
-    /// };
+    /// use kernel::page::Page;
     ///
     /// let page = Page::alloc_frozen(GFP_KERNEL)?;
-    ///
-    /// // SAFETY: The page was just allocated and is not shared, so there are no concurrent reads
-    /// // or writes to the page, and no reference to the data of the page exists.
-    /// unsafe { page.fill_zero_raw(0, PAGE_SIZE)? };
-    /// # Ok::<(), Error>(())
+    /// # Ok::<(), kernel::alloc::AllocError>(())
     /// ```
     #[inline]
     pub fn alloc_frozen(flags: Flags) -> Result<Owned<Self>, AllocError> {
+        let flags = flags | __GFP_ZERO;
+
         // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
         // is always safe to call this method.
         let page = unsafe { bindings::alloc_frozen_pages(flags.as_raw(), 0) };
         let page = NonNull::new(page).ok_or(AllocError)?;
 
         // INVARIANT: The page was just allocated with `alloc_frozen_pages()`, so it is frozen and
-        // we own it.
+        // we own it. We allocated with `__GFP_ZERO`, so the data of the page is initialized. The
+        // page is newly allocated, so nothing references or accesses its data.
         // SAFETY:
         // - We just successfully allocated the page, so `page` points to a valid `struct page`.
         //   Since `Page` is transparent over `struct page`, we can cast the pointer directly.
