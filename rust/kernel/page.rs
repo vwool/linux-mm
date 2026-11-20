@@ -32,8 +32,7 @@ use crate::{
         Opaque,
         Ownable,
         Owned, //
-    },
-    uaccess::UserSliceReader, //
+    }, //
 };
 use core::{
     marker::PhantomData,
@@ -630,35 +629,6 @@ impl<Kind: PageKind> Page<Kind> {
         // write through the view, and no reference to the data that is written exists. The bytes
         // written are initialized. `fill` only uses the view on the current task.
         unsafe { self.with_page_as_sysmem(offset, len, fill) }
-    }
-
-    /// Copies data from userspace into this page.
-    ///
-    /// This method will perform bounds checks on the page offset. If `offset .. offset+len` goes
-    /// outside of the page, then this call returns [`EINVAL`].
-    ///
-    /// Like the other `UserSliceReader` methods, data races are allowed on the userspace address.
-    /// However, they are not allowed on the page you are copying into.
-    ///
-    /// # Safety
-    ///
-    /// * Callers must ensure that this call does not race with a read or write to the same page
-    ///   that overlaps with this write.
-    /// * Callers must ensure that no reference to the data of the page that overlaps with this
-    ///   write exists during this call. Such references can be obtained from a
-    ///   [`Page<Exclusive>`], see [`Page::as_slice`].
-    pub unsafe fn copy_from_user_slice_raw(
-        &self,
-        reader: &mut UserSliceReader,
-        offset: usize,
-        len: usize,
-    ) -> Result {
-        self.with_pointer_into_page(offset, len, move |dst| {
-            // SAFETY: If `with_pointer_into_page` calls into this closure, then it has performed a
-            // bounds check and guarantees that `dst` is valid for `len` bytes. The caller
-            // guarantees that there are no races, so `dst` is valid for atomic writes.
-            unsafe { reader.read_raw(dst, len) }
-        })
     }
 }
 
