@@ -884,3 +884,28 @@ pub unsafe fn memcpy(src: *const u8, dst: *mut u8, len: usize) {
         )
     };
 }
+
+/// Set `len` bytes at `dst` to `value` using byte-wise atomic operations.
+///
+/// This is the concurrent-safe counterpart of `core::ptr::write_bytes()`. Because of the atomicity
+/// at byte level, when racing with another concurrent atomic access, or with an external access
+/// (from DMA or userspace), the behavior of this function is defined: the memory is written at (at
+/// least) byte granularity.
+///
+/// Implementation note: this is currently implemented by the kernel's `memset()`, which is
+/// implemented in a way such that byte-wise atomic memory store instructions are used.
+///
+/// # Safety
+///
+/// Callers must ensure that `dst` is valid for atomic writes for `len` bytes for the duration of
+/// the call.
+#[inline]
+pub unsafe fn memset(dst: *mut u8, value: u8, len: usize) {
+    // SAFETY: By the safety requirements of this function, the following operation will not:
+    //  - Trap.
+    //  - Invalidate any reference invariants.
+    //  - Race with any operation by the Rust AM, as `bindings::memset` is a byte-wise atomic
+    //    operation and all operations by the Rust AM to the involved memory area use byte-wise
+    //    atomic semantics.
+    unsafe { bindings::memset(dst.cast::<kernel::ffi::c_void>(), value.into(), len) };
+}
