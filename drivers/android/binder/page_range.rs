@@ -538,14 +538,12 @@ impl ShrinkablePageRange {
         offset: usize,
         size: usize,
     ) -> Result {
-        // SAFETY: `self.iterate` has the same safety requirements as `copy_from_user_slice`. The
-        // pages of this range are `Page<RefCounted>` pages, and this driver never creates a
-        // reference to their data, so no reference to the data that is written exists.
-        unsafe {
-            self.iterate(offset, size, |page, offset, to_copy| {
-                page.copy_from_user_slice_raw(reader, offset, to_copy)
-            })
-        }
+        let copy = |page: &Page, offset: usize, to_copy: usize| {
+            page.with_page_as_sysmem_local(offset, to_copy, |view| reader.read_sysmem(view))
+        };
+
+        // SAFETY: `self.iterate` has the same safety requirements as `copy_from_user_slice`.
+        unsafe { self.iterate(offset, size, copy) }
     }
 
     /// Copy from this page range into kernel space.
@@ -605,14 +603,15 @@ impl ShrinkablePageRange {
     ///
     /// All pages touched by this operation must be in use for the duration of this call.
     pub(crate) unsafe fn fill_zero(&self, offset: usize, size: usize) -> Result {
-        // SAFETY: `self.iterate` has the same safety requirements as `fill_zero`. The pages of
-        // this range are `Page<RefCounted>` pages, and this driver never creates a reference to
-        // their data, so no reference to the data that is written exists.
-        unsafe {
-            self.iterate(offset, size, |page, offset, len| {
-                page.fill_zero_raw(offset, len)
+        let fill = |page: &Page, offset: usize, len: usize| {
+            page.with_page_as_sysmem_local(offset, len, |view| {
+                view.fill_zero();
+                Ok(())
             })
-        }
+        };
+
+        // SAFETY: `self.iterate` has the same safety requirements as `fill_zero`.
+        unsafe { self.iterate(offset, size, fill) }
     }
 }
 
