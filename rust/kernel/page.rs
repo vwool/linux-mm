@@ -374,6 +374,8 @@ impl<Kind: PageKind> Page<Kind> {
     /// Callers must ensure that:
     ///
     /// - This call does not race with a write to the source page that overlaps with this read.
+    /// - No mutable reference to the data of the page that overlaps with this read exists during
+    ///   this call.
     /// - The memory region of `dst` does not overlap with the memory of the page.
     ///
     /// # Examples
@@ -391,7 +393,8 @@ impl<Kind: PageKind> Page<Kind> {
     /// // way while `dst` is alive.
     /// let dst = unsafe { SysMem::new(&raw mut buf as *mut [u8]) };
     ///
-    /// // SAFETY: `page` is not written to during this call, and `buf` is not part of the page.
+    /// // SAFETY: `page` is not written to during this call, no reference to the data of `page`
+    /// // exists, and `buf` is not part of the page.
     /// unsafe { page.read_sysmem(dst, 0)? };
     /// assert_eq!(buf, [0u8; 16]);
     /// # Ok::<(), Error>(())
@@ -453,6 +456,10 @@ impl<Kind: PageKind> Page<Kind> {
     ///
     /// - This call does not race with a read or write to the destination page that overlaps with
     ///   this write.
+    /// - No reference to the data of the page that overlaps with this write exists during this
+    ///   call. Such references can be obtained from a [`Page<Exclusive>`], see
+    ///   [`Page::as_slice`].
+    /// - If the page is a [`Page<Exclusive>`], the bytes of `src` are initialized.
     /// - The memory region of `src` does not overlap with the memory of the page.
     ///
     /// # Examples
@@ -476,8 +483,8 @@ impl<Kind: PageKind> Page<Kind> {
     ///     )
     /// };
     ///
-    /// // SAFETY: `page` is not accessed in any other way during these calls, and neither `data`
-    /// // nor `buf` is part of the page.
+    /// // SAFETY: `page` is not accessed in any other way during these calls, no reference to the
+    /// // data of `page` exists, and neither `data` nor `buf` is part of the page.
     /// unsafe {
     ///     page.write_sysmem(src, 0)?;
     ///     page.read_sysmem(dst, 0)?;
