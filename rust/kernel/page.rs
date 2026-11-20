@@ -20,7 +20,8 @@ use crate::{
         Io,
         IoCopyable,
         SysMem,
-        SysMemBackend, //
+        SysMemBackend,
+        SysMemLocal, //
     },
     sync::aref::{
         self,
@@ -132,6 +133,8 @@ impl PageKind for Base {}
 ///
 /// The data of a [`Page<Shared>`] can be accessed concurrently by other parties, such as user
 /// space, devices or other kernel code. Thus, no Rust reference to the data of the page exists.
+/// The data is accessed with volatile or byte-wise atomic operations through a [`SysMemLocal`],
+/// see [`Page::with_page_as_sysmem_local`].
 ///
 /// A [`Page<RefCounted>`] and a [`Page<Frozen>`] dereference to a [`Page<Shared>`]. A page that
 /// is managed by other means can be referenced as a [`Page<Shared>`] with [`Page::from_raw`].
@@ -374,12 +377,13 @@ impl<Kind: PageKind> Page<Kind> {
     /// Runs a piece of code with a range of this page mapped as a [`SysMem`] view.
     ///
     /// If `f` is called, then it is called with a view of the `len` bytes of the page that start
-    /// at `offset`. Accesses through the view are volatile or byte-wise atomic, so the view is
-    /// suitable for a page whose data is subject to concurrent writes by hardware or user space.
-    /// The view is valid for the duration of the call to `f`.
+    /// at `offset`. The view is valid for the duration of the call to `f`.
     ///
     /// If `offset` and `len` refer to a region outside of this page, then this method returns
     /// [`EINVAL`] and does not call `f`.
+    ///
+    /// This is the building block for the accessors of [`Page`]. Use
+    /// [`Page::with_page_as_sysmem_local`] for safe access to the data of a [`Page<Shared>`].
     ///
     /// # Safety
     ///
@@ -655,6 +659,83 @@ impl<Kind: PageKind> Page<Kind> {
             // guarantees that there are no races, so `dst` is valid for atomic writes.
             unsafe { reader.read_raw(dst, len) }
         })
+    }
+}
+
+impl Page<Shared> {
+    /// Runs a piece of code with a range of this page mapped as a [`SysMemLocal`] view.
+    ///
+    /// If `f` is called, then it is called with a view of the `len` bytes of the page that start
+    /// at `offset`. Accesses through the view are volatile or byte-wise atomic, so the view is
+    /// suitable for a page whose data is subject to concurrent accesses by hardware, by user space
+    /// or by other kernel code. When an access races with a write, the data observed may be
+    /// arbitrary. The view is valid for the duration of the call to `f`.
+    ///
+    /// The view is not [`Send`], as it can be backed by a mapping that is local to the current
+    /// task.
+    ///
+    /// If `offset` and `len` refer to a region outside of this page, then this method returns
+    /// [`EINVAL`] and does not call `f`.
+    ///
+    /// This method is not available for a [`Page<Exclusive>`], as writing through the view would
+    /// violate the aliasing rules for the slices returned by [`Page::as_slice`] and
+    /// [`Page::as_mut_slice`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::{
+    ///     io::Io,
+    ///     page::Page, //
+    /// };
+    ///
+    /// let page = Page::alloc_page(GFP_KERNEL)?;
+    /// let mut buf = [0xffu8; 4];
+    ///
+    /// page.with_page_as_sysmem_local(8, 4, |view| {
+    ///     view.copy_to_slice(&mut buf);
+    ///     assert_eq!(buf, [0u8; 4]);
+    ///
+    ///     view.copy_from_slice(&[1, 2, 3, 4]);
+    ///     view.copy_to_slice(&mut buf);
+    ///     assert_eq!(buf, [1, 2, 3, 4]);
+    ///
+    ///     view.fill_zero();
+    ///     view.copy_to_slice(&mut buf);
+    ///     assert_eq!(buf, [0u8; 4]);
+    ///     Ok(())
+    /// })?;
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// Copy data from user space to a page:
+    ///
+    /// ```
+    /// use kernel::{
+    ///     page::Page,
+    ///     uaccess::UserSliceReader, //
+    /// };
+    ///
+    /// fn copy_to_page(page: &Page, reader: &mut UserSliceReader, len: usize) -> Result {
+    ///     page.with_page_as_sysmem_local(0, len, |view| reader.read_sysmem(view))
+    /// }
+    /// ```
+    pub fn with_page_as_sysmem_local<T>(
+        &self,
+        offset: usize,
+        len: usize,
+        f: impl FnOnce(SysMemLocal<'_, [u8]>) -> Result<T>,
+    ) -> Result<T> {
+        let f = move |mem: SysMem<'_, [u8]>| f(SysMemLocal::from(mem));
+
+        // SAFETY:
+        // - By the type invariant of `Page<Shared>`, no plain access to the data of the page races
+        //   with another access, and no Rust reference to the data of the page exists.
+        // - Safe code can only write initialized bytes through a `SysMemLocal`.
+        // - `f` converts the view to a `SysMemLocal` before it is used. A `SysMemLocal` is not
+        //   `Send` and it cannot outlive the call to `f`, so the view is only used on the current
+        //   task.
+        unsafe { self.with_page_as_sysmem(offset, len, f) }
     }
 }
 
