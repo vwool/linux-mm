@@ -11,6 +11,7 @@ use crate::{
     error::Result,
     ffi::{c_char, c_void},
     fs::file,
+    io::SysMem,
     prelude::*,
     ptr::KnownSize,
     transmute::{AsBytes, FromBytes},
@@ -290,6 +291,37 @@ impl UserSliceReader {
         self.ptr = self.ptr.wrapping_byte_add(len);
         self.length -= len;
         Ok(())
+    }
+
+    /// Reads raw data from the user slice into the system memory region `out`.
+    ///
+    /// Reads `out.len()` bytes. The writes to `out` are byte-wise atomic, so they are well-defined
+    /// even if the memory of `out` is concurrently accessed by hardware, by user space, or by
+    /// other kernel code using atomic or volatile accesses.
+    ///
+    /// Fails with [`EFAULT`] if the read happens on a bad address, or if the read goes out of
+    /// bounds of this [`UserSliceReader`]. This call may modify the memory of `out` even if it
+    /// returns an error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use kernel::{
+    ///     io::SysMem,
+    ///     uaccess::UserSliceReader, //
+    /// };
+    ///
+    /// fn fill_from_user(reader: &mut UserSliceReader, mem: SysMem<'_, [u8]>) -> Result {
+    ///     reader.read_sysmem(mem)
+    /// }
+    /// ```
+    pub fn read_sysmem(&mut self, out: SysMem<'_, [u8]>) -> Result {
+        let out = out.as_ptr();
+
+        // SAFETY: By the type invariant of `SysMem`, the memory of `out` is valid for writing
+        // `out.len()` bytes, and no plain access races with this write, so it is valid for atomic
+        // writes.
+        unsafe { self.read_raw(out.cast(), out.len()) }
     }
 
     /// Reads raw data from the user slice into a kernel buffer.
