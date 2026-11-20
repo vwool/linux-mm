@@ -11,7 +11,7 @@ use crate::{
     error::Result,
     ffi::{c_char, c_void},
     fs::file,
-    io::SysMem,
+    io::{SysMem, SysMemScope},
     prelude::*,
     ptr::KnownSize,
     transmute::{AsBytes, FromBytes},
@@ -315,7 +315,7 @@ impl UserSliceReader {
     ///     reader.read_sysmem(mem)
     /// }
     /// ```
-    pub fn read_sysmem(&mut self, out: SysMem<'_, [u8]>) -> Result {
+    pub fn read_sysmem<S: SysMemScope>(&mut self, out: SysMem<'_, [u8], S>) -> Result {
         let out = out.as_ptr();
 
         // SAFETY: By the type invariant of `SysMem`, the memory of `out` is valid for writing

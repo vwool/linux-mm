@@ -1436,11 +1436,41 @@ impl_mmio_io_capable!(RelaxedMmioBackend, u32, readl_relaxed, writel_relaxed);
 #[cfg(CONFIG_64BIT)]
 impl_mmio_io_capable!(RelaxedMmioBackend, u64, readq_relaxed, writeq_relaxed);
 
-/// I/O Backend for system memory.
-pub struct SysMemBackend;
+mod private {
+    pub trait Sealed {}
+}
 
-impl IoBackend for SysMemBackend {
-    type View<'a, T: ?Sized + KnownSize> = SysMem<'a, T>;
+/// Marker trait for the scopes of a [`SysMem`].
+///
+/// The scope of a [`SysMem`] describes which tasks the view can be used on. See [`AnyTask`] and
+/// [`CurrentTask`].
+pub trait SysMemScope: private::Sealed {}
+
+/// The default [`SysMemScope`]: the view can be used on any task.
+///
+/// A [`SysMem`] of this scope is [`Send`] and [`Sync`] when its target is [`Sync`].
+pub enum AnyTask {}
+
+impl private::Sealed for AnyTask {}
+impl SysMemScope for AnyTask {}
+
+/// A [`SysMemScope`] for a view that can only be used on the task that created it.
+///
+/// This is the scope of a view whose memory is only accessible to the current task, such as a
+/// view that is backed by a mapping that is local to the current task. A [`SysMem`] of this scope,
+/// that is, a [`SysMemLocal`], is neither [`Send`] nor [`Sync`].
+pub enum CurrentTask {}
+
+impl private::Sealed for CurrentTask {}
+impl SysMemScope for CurrentTask {}
+
+/// I/O Backend for system memory.
+///
+/// The backend is generic over the [`SysMemScope`] of its views.
+pub struct SysMemBackend<S: SysMemScope = AnyTask>(PhantomData<S>);
+
+impl<S: SysMemScope> IoBackend for SysMemBackend<S> {
+    type View<'a, T: ?Sized + KnownSize> = SysMem<'a, T, S>;
 
     #[inline]
     fn as_ptr<'a, T: ?Sized + KnownSize>(view: Self::View<'a, T>) -> *mut T {
@@ -1466,9 +1496,9 @@ impl IoBackend for SysMemBackend {
 /// `write_volatile`.
 macro_rules! impl_sysmem_io_capable {
     ($ty:ty) => {
-        impl IoCapable<$ty> for SysMemBackend {
+        impl<S: SysMemScope> IoCapable<$ty> for SysMemBackend<S> {
             #[inline]
-            fn io_read(view: SysMem<'_, $ty>) -> $ty {
+            fn io_read(view: SysMem<'_, $ty, S>) -> $ty {
                 // SAFETY:
                 // - Per type invariant, `ptr` is valid and aligned.
                 // - Using read_volatile() here so that race with hardware is well-defined.
@@ -1480,7 +1510,7 @@ macro_rules! impl_sysmem_io_capable {
             }
 
             #[inline]
-            fn io_write(view: SysMem<'_, $ty>, value: $ty) {
+            fn io_write(view: SysMem<'_, $ty, S>, value: $ty) {
                 // SAFETY:
                 // - Per type invariant, `ptr` is valid and aligned.
                 // - Using write_volatile() here so that race with hardware is well-defined.
@@ -1499,7 +1529,7 @@ impl_sysmem_io_capable!(u32);
 #[cfg(CONFIG_64BIT)]
 impl_sysmem_io_capable!(u64);
 
-impl IoCopyable for SysMemBackend {
+impl<S: SysMemScope> IoCopyable for SysMemBackend<S> {
     #[inline]
     unsafe fn copy_from_io(view: Self::View<'_, [u8]>, buffer: *mut u8) {
         // SAFETY:
@@ -1562,31 +1592,103 @@ impl IoCopyable for SysMemBackend {
 /// Accesses performed by hardware or by user space are not plain accesses in this sense. Racing
 /// with them is well-defined, but the data observed may be arbitrary.
 ///
+/// A `SysMem` is generic over a [`SysMemScope`], which describes the tasks that the view can be
+/// used on. A view of the default scope [`AnyTask`] can be sent to and shared with other tasks. A
+/// view of the scope [`CurrentTask`], a [`SysMemLocal`], cannot leave the task that created it.
+/// Apart from that, the two are identical.
+///
 /// # Invariants
 ///
 /// - `self.ptr.addr() .. self.ptr.addr() + KnownSize::size(self.ptr)` is valid and aligned kernel
-///   accessible memory region for the lifetime `'a`.
+///   accessible memory region for the lifetime `'a`. For a view of the scope [`CurrentTask`],
+///   this holds on the task that created the view.
 /// - No plain access to that memory region races with an access performed through this view.
-pub struct SysMem<'a, T: ?Sized> {
+pub struct SysMem<'a, T: ?Sized, S: SysMemScope = AnyTask> {
     ptr: *mut T,
-    phantom: PhantomData<&'a ()>,
+    phantom: PhantomData<(&'a (), S)>,
 }
 
-impl<T: ?Sized> Copy for SysMem<'_, T> {}
-impl<T: ?Sized> Clone for SysMem<'_, T> {
+/// A view of a system memory region that can only be used on the task that created it.
+///
+/// This is a [`SysMem`] that is neither [`Send`] nor [`Sync`]. It is used for memory that is only
+/// accessible to the current task, such as a page that is mapped with a mapping that is local to
+/// the current task.
+///
+/// A [`SysMem`] of the default scope converts to a `SysMemLocal` with [`From`].
+///
+/// # Examples
+///
+/// ```
+/// use kernel::io::{
+///     Io,
+///     SysMem,
+///     SysMemLocal, //
+/// };
+///
+/// let mut data = [0u8; 4];
+///
+/// // SAFETY: `data` is valid for the lifetime of `mem`, and it is not accessed in any other way
+/// // while `mem` is alive.
+/// let mem = unsafe { SysMem::new(&raw mut data as *mut [u8]) };
+/// let local = SysMemLocal::from(mem);
+///
+/// local.copy_from_slice(&[1, 2, 3, 4]);
+/// local.fill_zero();
+///
+/// let mut buf = [0xffu8; 4];
+/// local.copy_to_slice(&mut buf);
+/// assert_eq!(buf, [0u8; 4]);
+/// ```
+pub type SysMemLocal<'a, T> = SysMem<'a, T, CurrentTask>;
+
+impl<T: ?Sized, S: SysMemScope> Copy for SysMem<'_, T, S> {}
+impl<T: ?Sized, S: SysMemScope> Clone for SysMem<'_, T, S> {
     #[inline]
     fn clone(&self) -> Self {
         *self
     }
 }
 
-// SAFETY: `SysMem<'_, T>` is conceptually `&T`.
-unsafe impl<T: ?Sized + Sync> Send for SysMem<'_, T> {}
+// SAFETY: `SysMem<'_, T>` is conceptually `&T`. A view of the scope `AnyTask` can be used on any
+// task.
+unsafe impl<T: ?Sized + Sync> Send for SysMem<'_, T, AnyTask> {}
 
-// SAFETY: `SysMem<'_, T>` is conceptually `&T`.
-unsafe impl<T: ?Sized + Sync> Sync for SysMem<'_, T> {}
+// SAFETY: `SysMem<'_, T>` is conceptually `&T`. A view of the scope `AnyTask` can be used on any
+// task.
+unsafe impl<T: ?Sized + Sync> Sync for SysMem<'_, T, AnyTask> {}
 
-impl SysMem<'_, [u8]> {
+impl<'a, T: ?Sized> From<SysMem<'a, T>> for SysMemLocal<'a, T> {
+    #[inline]
+    fn from(value: SysMem<'a, T>) -> Self {
+        // INVARIANT: By the type invariant of `value`, the memory region is valid on all tasks,
+        // and no plain access races with an access through a view of it.
+        Self {
+            ptr: value.ptr,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, T: ?Sized> SysMemLocal<'a, T> {
+    /// Create a `SysMemLocal` from a raw pointer.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr.addr() .. ptr.addr() + KnownSize::size(ptr)` must be valid and aligned kernel
+    ///   accessible memory region on the current task for the lifetime `'a`.
+    /// - No plain access (see [`SysMem`]) to that memory region may race with an access performed
+    ///   through the returned view.
+    #[inline]
+    pub unsafe fn new_local(ptr: *mut T) -> Self {
+        // INVARIANT: Per safety requirement.
+        Self {
+            ptr,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<S: SysMemScope> SysMem<'_, [u8], S> {
     /// Writes zeroes to all bytes of the view using byte-wise atomic operations.
     #[inline]
     pub fn fill_zero(self) {
@@ -1614,7 +1716,9 @@ impl<'a, T: ?Sized> SysMem<'a, T> {
             phantom: PhantomData,
         }
     }
+}
 
+impl<T: ?Sized, S: SysMemScope> SysMem<'_, T, S> {
     /// Obtain the raw pointer to the memory.
     #[inline]
     pub fn as_ptr(self) -> *mut T {
@@ -1622,8 +1726,8 @@ impl<'a, T: ?Sized> SysMem<'a, T> {
     }
 }
 
-impl<'a, T: ?Sized + KnownSize> IoBase<'a> for SysMem<'a, T> {
-    type Backend = SysMemBackend;
+impl<'a, T: ?Sized + KnownSize, S: SysMemScope> IoBase<'a> for SysMem<'a, T, S> {
+    type Backend = SysMemBackend<S>;
     type Target = T;
 
     #[inline]
