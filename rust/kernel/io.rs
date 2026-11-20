@@ -1586,6 +1586,17 @@ unsafe impl<T: ?Sized + Sync> Send for SysMem<'_, T> {}
 // SAFETY: `SysMem<'_, T>` is conceptually `&T`.
 unsafe impl<T: ?Sized + Sync> Sync for SysMem<'_, T> {}
 
+impl SysMem<'_, [u8]> {
+    /// Writes zeroes to all bytes of the view using byte-wise atomic operations.
+    #[inline]
+    pub fn fill_zero(self) {
+        // SAFETY: Per type invariant, `self.ptr` is a valid kernel accessible memory region of
+        // `self.ptr.len()` bytes, and no plain access races with this write, so it is valid for
+        // atomic writes.
+        unsafe { atomic::memset(self.ptr.cast(), 0, self.ptr.len()) };
+    }
+}
+
 impl<'a, T: ?Sized> SysMem<'a, T> {
     /// Create a `SysMem` from a raw pointer.
     ///
